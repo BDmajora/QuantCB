@@ -54,7 +54,6 @@ QuantCB is a 16M parameter Transformer engine built to demonstrate high-efficien
 
 Verify the architectural integrity and run the optimization pipeline:
 
-export PYTHONPATH=$PYTHONPATH:.
 python3 test_full_model.py
 python3 optimize.py
 python3 benchmark.py
