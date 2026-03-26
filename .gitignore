@@ -32,5 +32,5 @@ dist/
 *.egg-info/
 
 # Rust Build Artifacts
-/quantcd_rust/target/
+/quantcb_rust/target/
 EOF
