@@ -29,16 +29,15 @@ class QuantCB_Model(nn.Module):
         batch, seq_len = idx.shape
         device = idx.device
         
-        # Internal Causal Masking (strictly prohibits looking into the future)
+        # Internal Causal Masking
         if mask is None:
             mask = torch.tril(torch.ones(seq_len, seq_len, device=device)).view(1, 1, seq_len, seq_len)
 
         # Forward through embeddings and encoding
-        # Scaling by sqrt(d_model) stabilizes gradients for deeper stacks
         x = self.token_embedding(idx) * math.sqrt(self.d_model)
         x = self.pos_encoding(x)
         
-        # Forward through the block stack with masking
+        # Forward through the block stack
         for block in self.blocks:
             x = block(x, mask=mask)
             
@@ -47,10 +46,42 @@ class QuantCB_Model(nn.Module):
         
         loss = None
         if targets is not None:
-            # Flatten tensors for CrossEntropyLoss (Batch*Seq, Vocab_Size)
             loss = nn.functional.cross_entropy(
                 logits.view(-1, logits.size(-1)), 
                 targets.view(-1)
             )
             
         return logits, loss
+
+    @torch.no_grad()
+    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+        """
+        Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
+        the sequence max_new_tokens times, feeding the predictions back into the model each time.
+        """
+        for _ in range(max_new_tokens):
+            # If the sequence context becomes too long for the Positional Encoding, crop it
+            # (Adjust '1024' based on your PositionalEncoding's max_len)
+            idx_cond = idx if idx.size(1) <= 1024 else idx[:, -1024:]
+            
+            # Forward the model to get the logits for the index in the sequence
+            logits, _ = self(idx_cond)
+            
+            # Focus only on the last time step and scale by temperature
+            logits = logits[:, -1, :] / temperature
+            
+            # Optional: crop the distribution to only top k options
+            if top_k is not None:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = -float('Inf')
+            
+            # Apply softmax to convert logits to (normalized) probabilities
+            probs = torch.softmax(logits, dim=-1)
+            
+            # Sample from the distribution
+            idx_next = torch.multinomial(probs, num_samples=1)
+            
+            # Append sampled index to the running sequence and continue
+            idx = torch.cat((idx, idx_next), dim=1)
+
+        return idx

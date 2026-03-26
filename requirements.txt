@@ -10,3 +10,4 @@ huggingface_hub>=0.23.0
 # Utilities
 tqdm>=4.66.0
 requests>=2.31.0
+maturin>=1.4.0

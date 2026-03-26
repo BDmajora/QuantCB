@@ -44,12 +44,19 @@ QuantCB is a 16.68M parameter Transformer engine optimized for high-efficiency s
    git clone https://github.com/BDmajora/QuantCB.git
    cd QuantCB
 
-2. Set up a virtual environment:
+2. Install the Rust Toolchain (Required for BPE training):
+   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+   . "$HOME/.cargo/env"
+
+3. Set up a virtual environment:
    python3 -m venv venv
    source venv/bin/activate
 
-3. Install dependencies:
-   pip install torch numpy
+4. Install dependencies and compile the Rust extension:
+   pip install -r requirements.txt
+   cd quantcb_rust
+   maturin develop --release
+   cd ..
 
 ## Usage
 

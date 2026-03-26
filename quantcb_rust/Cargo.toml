@@ -1,0 +1,12 @@
+[package]
+name = "quantcb_rust"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "quantcb_rust"
+crate-type = ["cdylib"]
+
+[dependencies]
+# Updated to 0.22.2 for better 3.13 support
+pyo3 = { version = "0.22.2", features = ["extension-module", "abi3-py312"] }
