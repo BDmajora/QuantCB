@@ -1,43 +1,57 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import math
 
-class QuantCB_Attention(nn.Module):
-    def __init__(self, d_model, n_heads):
+class MLA_Attention(nn.Module):
+    def __init__(self, d_model, n_heads, latent_dim=128, head_dim=64):
         super().__init__()
-        assert d_model % n_heads == 0
-        self.d_model = d_model
         self.n_heads = n_heads
-        self.d_k = d_model // n_heads
-
-        self.W_q = nn.Linear(d_model, d_model)
-        self.W_k = nn.Linear(d_model, d_model)
-        self.W_v = nn.Linear(d_model, d_model)
-        self.W_o = nn.Linear(d_model, d_model)
-
-    def forward(self, x):
-        batch, seq_len, _ = x.shape
-
-        # 1. Linear Projections
-        q = self.W_q(x).view(batch, seq_len, self.n_heads, self.d_k)
-        k = self.W_k(x).view(batch, seq_len, self.n_heads, self.d_k)
-        v = self.W_v(x).view(batch, seq_len, self.n_heads, self.d_k)
-
-        # 2. Scaled Dot-Product: (B, L, H, D) x (B, S, H, D) -> (B, H, L, S)
-        scores = torch.einsum("bqhd, bkhd -> bhqk", q, k) / math.sqrt(self.d_k)
-
-        # 3. Causal Masking (The "Graph Integrity" Step)
-        # Create lower-triangular mask of 1s
-        mask = torch.tril(torch.ones(seq_len, seq_len, device=x.device))
-        # Expand to match score dimensions (Batch, Heads, L, S)
-        mask = mask.view(1, 1, seq_len, seq_len)
-        # Fill zeros (future) with -inf
-        scores = scores.masked_fill(mask == 0, float("-inf"))
-
-        # 4. Softmax & Value Weighting
-        attn = torch.softmax(scores, dim=-1)
-        out = torch.einsum("bhqk, bkhd -> bqhd", attn, v)
+        self.head_dim = head_dim
+        self.latent_dim = latent_dim
         
-        # 5. Output Projection
-        out = out.contiguous().view(batch, seq_len, self.d_model)
-        return self.W_o(out)
+        # Query projection (Standard)
+        self.W_q = nn.Linear(d_model, n_heads * head_dim, bias=False)
+        
+        # KV Compression (The MLA Secret Sauce)
+        # Down-project input to a smaller latent dimension
+        self.W_dkv = nn.Linear(d_model, latent_dim, bias=False)
+        self.ln_kv = nn.LayerNorm(latent_dim)
+        
+        # Up-project latent vector to full multi-head keys and values
+        self.W_uk = nn.Linear(latent_dim, n_heads * head_dim, bias=False)
+        self.W_uv = nn.Linear(latent_dim, n_heads * head_dim, bias=False)
+        
+        # Output projection
+        self.W_o = nn.Linear(n_heads * head_dim, d_model, bias=False)
+
+    def forward(self, x, mask=None):
+        batch_size, seq_len, _ = x.shape
+        
+        # 1. Generate Queries
+        q = self.W_q(x).view(batch_size, seq_len, self.n_heads, self.head_dim)
+        q = q.transpose(1, 2) # (batch, n_heads, seq_len, head_dim)
+        
+        # 2. Compress to Latent Vector (This is what you would cache in inference)
+        c_kv = self.ln_kv(self.W_dkv(x))
+        
+        # 3. Expand Latent to Keys and Values
+        k = self.W_uk(c_kv).view(batch_size, seq_len, self.n_heads, self.head_dim)
+        v = self.W_uv(c_kv).view(batch_size, seq_len, self.n_heads, self.head_dim)
+        
+        k = k.transpose(1, 2) # (batch, n_heads, seq_len, head_dim)
+        v = v.transpose(1, 2) # (batch, n_heads, seq_len, head_dim)
+        
+        # 4. Standard Scaled Dot-Product Attention
+        attn_scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        
+        if mask is not None:
+            attn_scores = attn_scores.masked_fill(mask == 0, float('-inf'))
+            
+        attn_weights = F.softmax(attn_scores, dim=-1)
+        
+        # 5. Context Calculation and Projection
+        context = torch.matmul(attn_weights, v)
+        context = context.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
+        
+        return self.W_o(context)
