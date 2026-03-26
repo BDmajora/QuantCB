@@ -30,4 +30,7 @@ Thumbs.db
 build/
 dist/
 *.egg-info/
+
+# Rust Build Artifacts
+/quantcd_rust/target/
 EOF
