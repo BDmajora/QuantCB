@@ -1,31 +1,32 @@
-# QuantCB: Inference Optimization & Transformer Architecture
+# QuantCB: Latent Attention & INT8 Inference Engine
 
-QuantCB is a 16M parameter Transformer engine built to demonstrate high-efficiency sequence modeling and inference on CPU-constrained environments. This project bridges systems administration with machine learning architecture, focusing on memory footprint reduction, modular tensor operations, and hardware-aware quantization.
+QuantCB is a 16.68M parameter Transformer engine optimized for high-efficiency sequence modeling in CPU-constrained and "Local-First" environments. By implementing **Multi-Head Latent Attention (MLA)** and a custom **Symmetric INT8 Quantization** pipeline, this project bridges systems-level performance with modern LLM architecture.
 
 ## Features
 
-* Custom BPE Tokenizer: A robust Byte-Pair Encoding implementation with a UTF-8 byte-fallback mechanism. Designed to handle specialized technical datasets with zero Out-of-Vocabulary (OOV) errors.
-* Multi-Head Attention (MHA): Implements the transformer attention mechanism using torch.einsum for optimized matrix contractions, significantly reducing memory overhead compared to standard transpose/reshape operations.
-* Strict Causal Masking: Enforces causal integrity via a lower-triangular matrix mask, verified with bit-identical unit tests to prevent information leakage from future tokens.
-* Inference Optimization (PTQ): Features a custom Post-Training Quantization pipeline. Manually maps FP32 weights to INT8 precision using symmetric affine quantization, reducing the model footprint from 69.24MB to 34.08MB (2.03x compression).
-* Pre-Norm Architecture: Utilizes a Pre-Norm configuration with GELU activation and residual paths for superior numerical stability during training and inference.
+* **Multi-Head Latent Attention (MLA):** Inspired by DeepSeek-V3/FlashMLA. Uses a latent vector bottleneck to compress Key-Value pairs, significantly reducing KV cache memory usage during long-context generation.
+* **Inference Optimization (INT8 PTQ):** Features a custom Post-Training Quantization pipeline. Manually maps FP32 weights to INT8 precision using symmetric affine quantization, reducing the model footprint from **68.52 MB** to **33.11 MB** (**2.07x compression**).
+* **Custom BPE Tokenizer:** A robust Byte-Pair Encoding implementation with a UTF-8 byte-fallback mechanism. Designed for specialized technical datasets with zero Out-of-Vocabulary (OOV) errors.
+* **Decoupled Architecture:** Utilizes a Pre-Norm configuration with GELU activations and `torch.einsum` optimized matrix contractions for superior numerical stability.
+* **Local-First Workflow:** Designed for offline deployment using local hardware (Ollama/Jan compatible philosophies) without unnecessary dependencies.
 
 ## Technical Stack
 
-* Frameworks: Python 3.10+, PyTorch (2.0+), NumPy
-* Core Logic: Multi-Head Causal Attention (einsum optimized)
-* Optimization: Symmetric Static INT8 Quantization
-* Benchmarking: Matplotlib for telemetry reports; Integrated testing for SOTA comparisons (Qwen/Llama).
+* **Frameworks:** Python 3.10+, PyTorch (2.0+), NumPy
+* **Core Logic:** Multi-Head Latent Attention (MLA)
+* **Optimization:** Symmetric Static INT8 Quantization
+* **Environment:** Linux-first (Ubuntu/Debian), Venv-isolated
 
 ## Project Structure
 
-* models/attention.py: Masked Multi-Head Attention layer implementation.
-* models/layers.py: FFN, Positional Encoding, and Transformer Block logic.
-* models/quantcb_model.py: Full Transformer wrapper and LM head.
-* tokenizer_basic.py: Core logic for BPE training, encoding, and decoding.
-* train.py: Structural verification loop and FP32 checkpointing.
-* optimize.py: Quantization scripts for FP32 to INT8 weight conversion.
-* benchmark.py: Performance metrics for latency and memory footprint.
+* **models/attention.py**: Masked Multi-Head Latent Attention implementation.
+* **models/layers.py**: FFN, RMSNorm, and Transformer Block logic.
+* **models/quantcb_model.py**: Full Transformer wrapper and LM head.
+* **src/tokenizer_basic.py**: Core logic for BPE training, encoding, and decoding.
+* **src/train.py**: Structural verification loop and FP32 checkpointing.
+* **src/optimize.py**: Quantization scripts for FP32 to INT8 weight conversion.
+* **src/inference_int8.py**: Dequantization logic and inference verification.
+* **modelOutput/**: Storage for `.pth` model checkpoints (Git ignored).
 
 ## Performance Tracking (CPU)
 
@@ -33,9 +34,9 @@ QuantCB is a 16M parameter Transformer engine built to demonstrate high-efficien
 
 | Metric | FP32 (Base) | INT8 (Optimized) |
 | :--- | :--- | :--- |
-| Model Size | 69.24 MB | 34.08 MB |
-| Compression | 1.0x | 2.03x |
-| Avg Latency | 10.15 ms | N/A (Dequantized) |
+| Model Size | 68.52 MB | 33.11 MB |
+| Compression | 1.0x | 2.07x |
+| Status | Verified | Verified |
 
 ## Installation
 
@@ -48,17 +49,20 @@ QuantCB is a 16M parameter Transformer engine built to demonstrate high-efficien
    source venv/bin/activate
 
 3. Install dependencies:
-   pip install -r requirements.txt
+   pip install torch numpy
 
 ## Usage
 
-Verify the architectural integrity and run the optimization pipeline:
+The project uses a root-level runner for all operations:
 
-python3 test_full_model.py
-python3 optimize.py
-python3 benchmark.py
+* **To Train:** python3 run.py train
+* **To Quantize:** python3 run.py optimize
+* **To Run Inference:** python3 run.py inference
+* **To Run Tests:** python3 run_tests.py
 
 ## Validation Suite
-- test_causal.py: Validates the Directed Acyclic Graph (DAG) flow of the attention mechanism.
-- test_ffn.py: Confirms position-wise independence across the feed-forward stack.
-- test_tokenizer.py: Integrity suite for verifying round-trip string-to-token data.
+
+Located in /tests, these scripts ensure architectural integrity:
+- **test_causal.py**: Validates that future tokens do not leak into the past.
+- **test_attention.py**: Verifies the latent vector compression in the MLA block.
+- **test_tokenizer.py**: Integrity suite for round-trip BPE encoding.
