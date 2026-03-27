@@ -14,22 +14,16 @@ def load_model_weights(model, checkpoint_path, device, is_fp8=False):
         q_weights = checkpoint['weights']
         scales_dict = checkpoint['scales']
         
-        # Dequantize FP8 weights back to FP32 for inference
         dequantized_state_dict = {}
         for name, param in q_weights.items():
             scale_key = f"{name}_scales"
             if scale_key in scales_dict:
-                # Move tensor and scales to target device
                 param = param.to(device)
                 scale_tensor = scales_dict[scale_key].to(device)
-                
                 original_shape = param.shape
-                
-                # Infer the group size based on the number of scales saved
                 num_groups = scale_tensor.numel()
                 group_size = param.numel() // num_groups
                 
-                # Reshape, cast to FP32, apply the fine-grained scales, and reshape back
                 param_float = param.view(-1, group_size).float()
                 scale_expanded = scale_tensor.view(-1, 1)
                 
@@ -38,12 +32,13 @@ def load_model_weights(model, checkpoint_path, device, is_fp8=False):
             else:
                 dequantized_state_dict[name] = param.to(device)
         
-        model.load_state_dict(dequantized_state_dict)
+        # strict=False allows loading even if MTP weights are present/missing
+        model.load_state_dict(dequantized_state_dict, strict=False)
     else:
         print(f"\n--- Loading Base FP32 Checkpoint: {checkpoint_path} ---")
-        # Use weights_only=True for security and performance
         state_dict = torch.load(checkpoint_path, map_location=device, weights_only=True)
-        model.load_state_dict(state_dict)
+        # Use strict=False because train.py now saves MTP weights
+        model.load_state_dict(state_dict, strict=False)
     
     model.eval()
     return model
@@ -51,15 +46,12 @@ def load_model_weights(model, checkpoint_path, device, is_fp8=False):
 def generate():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
-    # Pathing Setup
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(script_dir) 
-    # Tokenizer is now stored in modelOutput
     tok_path = os.path.join(project_root, "modelOutput", "tokenizer.json")
 
-    # Interactive Model Selection
     print("Select Model Version:")
-    print("[1] Base (FP32)")
+    print("[1] MTP (Standard FP32)")
     print("[2] Optimized (FP8)")
     choice = input("Enter 1 or 2: ").strip()
 
@@ -67,19 +59,18 @@ def generate():
         filename = "quantcb_fp8.pth"
         is_fp8 = True
     else:
-        filename = "quantcb_base.pth"
+        # Synced with the new save name in train.py
+        filename = "quantcb_mtp.pth"
         is_fp8 = False
 
     model_path = os.path.join(project_root, "modelOutput", filename)
 
-    # 1. Setup Tokenizer
     tokenizer = QuantCB_Tokenizer()
     if not os.path.exists(tok_path):
         print(f"Error: Tokenizer not found at {tok_path}")
         return
     tokenizer.load(tok_path)
     
-    # 2. Architecture (SYNCED WITH TRAINING: d_ff=512, experts=8, top_k=2)
     vocab_size = 2048 
     model = QuantCB_Model(
         vocab_size=vocab_size, 
@@ -93,24 +84,21 @@ def generate():
         top_k=2           
     ).to(device)
 
-    # 3. Load Weights
     try:
         model = load_model_weights(model, model_path, device, is_fp8=is_fp8)
     except Exception as e:
         print(f"Error loading model: {e}")
         return
 
-    # 4. The Actual Generation
-    # Start with a sequence of 0 (usually the [PAD] or [BOS] token)
+    # Start with token 0 (assumed BOS/PAD)
     context = torch.zeros((1, 1), dtype=torch.long, device=device) 
     
-    print(f"\nGenerating 300 tokens (MLA + MoE Engine)...\n" + "="*40)
+    print(f"\nGenerating 300 tokens (MLA + MoE + MTP Architecture)...\n" + "="*40)
     
     with torch.no_grad():
-        # MLA Cache is handled internally within model.generate
+        # model.generate utilizes the primary head
         generated_ids = model.generate(context, max_new_tokens=300)[0].tolist()
     
-    # 5. Decode
     output_text = tokenizer.decode(generated_ids)
     print(output_text)
     print("\n" + "="*40)

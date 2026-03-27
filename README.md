@@ -2,22 +2,15 @@
 
 QuantCB is a high-performance Transformer engine optimized for "Local-First" environments. By combining Multi-Head Latent Attention (MLA), Sparse Mixture-of-Experts (MoE), and a Rust-backed BPE tokenizer, this project bridges low-level systems engineering with state-of-the-art LLM architectures.
 
-## Recent Milestone: FP8 Fine-Grained Scaling & MLA/MoE
-* **Fine-Grained FP8 Scaling**: Migrated from INT8 to E4M3 FP8 quantization using group-wise scaling ($group\_size=128$). Inspired by DeepGEMM, this approach preserves high dynamic range across MoE experts, significantly improving model accuracy on 8-bit hardware.
-* **Implemented Multi-Head Latent Attention (MLA)**: Inspired by DeepSeek-V3. Successfully reduced KV Cache memory footprint by compressing Key-Value pairs into a low-rank latent vector bottleneck ($d_{latent}=128$).
-* **Sparse Mixture-of-Experts (MoE)**: Integrated a 1-of-8 expert routing system. Achieved significant parameter scaling (8 specialized experts) while maintaining a constant CPU "Active" compute cost (top-k=2).
-* **Anti-Loop Inference Logic**: Implemented Repetition Penalty and Top-P (Nucleus) Sampling to eliminate "word salad" loops and force expert diversity during generation.
-* **Rust-Accelerated Tokenization**: Migrated core BPE training and encoding logic to Rust (quantcb_rust) using PyO3, achieving massive speedups in dataset preprocessing.
-
 ## Features
 
+* **Multi-Token Prediction (MTP)**: Inspired by DeepSeek-V3. During training, the model uses an independent transformer-based module to predict the $t+2$ token. This "look-ahead" objective forces the base model to build more robust latent representations without adding computational overhead during inference.
 * **Fine-Grained FP8 Quantization**: Advanced Post-Training Quantization (PTQ) pipeline. Utilizes E4M3 precision with block-level scaling factors to mitigate outlier-driven precision loss in MoE routers and experts.
 * **Sparse Mixture-of-Experts (MoE)**: High-capacity model architecture with sparse activation. Allows the model to learn specialized tasks (syntax, punctuation, character names) across different expert sub-networks.
 * **Multi-Head Latent Attention (MLA)**: Significant reduction in VRAM/RAM usage. Decouples content and latent signaling via low-rank compression for superior scaling during long-context generation.
 * **DeepGEMM-Inspired Inference**: Interactive runner allowing seamless switching between FP32 (Base) and Optimized FP8 models with group-wise dequantization logic.
 * **Rust BPE Core**: High-concurrency Byte-Pair Encoding with UTF-8 fallback. Ensures zero Out-of-Vocabulary (OOV) errors and rapid training on Shakespearean or technical corpora.
-* **Performance Tracking**: Established MoE baseline (Baseline: Step 500 @ 4.7475 loss with 8 experts).
-
+* **Performance Tracking**: Established MTP baseline (Baseline: Step 500 @ 5.2468 total loss with 8 experts and $t+2$ auxiliary signal).
 ## Technical Stack
 
 * **Languages:** Python 3.10+, Rust (Edition 2021)
@@ -75,14 +68,5 @@ QuantCB is a high-performance Transformer engine optimized for "Local-First" env
 
 The project uses a root-level runner for all operations:
 
-* **To Train:** python3 run.py train
-* **To Quantize:** python3 run.py optimize
-* **To Run Inference:** python3 run.py inference
+* **To Run Trainer or Generate:** python3 run.py
 * **To Run Tests:** python3 run_tests.py
-
-## Validation Suite
-
-Located in /tests, these scripts ensure architectural integrity:
-- **test_causal.py**: Validates that future tokens do not leak into the past.
-- **test_attention.py**: Verifies the latent vector compression in the MLA block.
-- **test_tokenizer.py**: Integrity suite for round-trip BPE encoding.
