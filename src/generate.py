@@ -1,7 +1,7 @@
 import torch
 import os
 from models.quantcb_model import QuantCB_Model
-from models.quantcb_engine import QuantCB_Engine  # New Import
+from models.quantcb_engine import QuantCB_Engine
 from tokenizer_basic import QuantCB_Tokenizer
 
 def load_model_weights(model, checkpoint_path, device, is_fp8=False):
@@ -58,7 +58,7 @@ def generate():
         filename = "quantcb_fp8.pth"
         is_fp8 = True
     else:
-        filename = "quantcb_mtp.pth"
+        filename = "quantcb_final.pth"
         is_fp8 = False
 
     model_path = os.path.join(project_root, "modelOutput", filename)
@@ -69,15 +69,14 @@ def generate():
         return
     tokenizer.load(tok_path)
     
-    # FIX: Define vocab_size from the tokenizer
     vocab_size = len(tokenizer.vocab) if hasattr(tokenizer, 'vocab') else 2048 
     
-    # 1. Initialize Raw Model
+    # CHANGED: d_ff updated to 1024 to match your checkpoint
     raw_model = QuantCB_Model(
         vocab_size=vocab_size, 
         d_model=256, 
         n_heads=8, 
-        d_ff=512,         
+        d_ff=1024,         
         n_layers=4,
         latent_dim=128, 
         head_dim=64,
@@ -85,24 +84,19 @@ def generate():
         top_k=2           
     ).to(device)
 
-    # 2. Load Weights into Raw Model
     try:
         raw_model = load_model_weights(raw_model, model_path, device, is_fp8=is_fp8)
     except Exception as e:
         print(f"Error loading model: {e}")
         return
 
-    # 3. Wrap in Engine for execution/generation
-    # Pass the model into the engine we just created
     engine = QuantCB_Engine(raw_model)
 
-    # Start with token 0
     context = torch.zeros((1, 1), dtype=torch.long, device=device) 
     
     print(f"\nGenerating 300 tokens (MLA + MoE + MTP Architecture)...\n" + "="*40)
     
     with torch.no_grad():
-        # engine.generate handles the KV-cache and looping
         generated_ids = engine.generate(context, max_new_tokens=300)[0].tolist()
     
     output_text = tokenizer.decode(generated_ids)

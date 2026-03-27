@@ -5,10 +5,11 @@ import torch.nn.functional as F
 class MTPModule(nn.Module):
     def __init__(self, d_model, n_heads, d_ff, embedding, head):
         super().__init__()
+        # These are shared with the base model - DO NOT re-initialize these!
         self.embedding = embedding 
         self.head = head           
         
-        # 1. Simplified Fusion
+        # 1. Projections for Fusion
         self.proj_h = nn.Linear(d_model, d_model, bias=False)
         self.proj_emb = nn.Linear(d_model, d_model, bias=False)
         self.ln_fusion = nn.LayerNorm(d_model)
@@ -23,37 +24,49 @@ class MTPModule(nn.Module):
             norm_first=True
         )
         
-        # 3. FIX: Targeted Initialization. 
-        # Apply ONLY to MTP-specific layers to prevent overwriting the shared LM Head and Embeddings.
-        self.proj_h.apply(self._init_weights)
-        self.proj_emb.apply(self._init_weights)
-        self.layer.apply(self._init_weights)
-        self.ln_fusion.apply(self._init_weights)
+        # 3. Targetted Initialization
+        # We only initialize the NEW layers. We leave self.embedding and self.head alone.
+        self._init_mtp_weights(self.proj_h)
+        self._init_mtp_weights(self.proj_emb)
+        self._init_mtp_weights(self.ln_fusion)
+        self._init_mtp_weights(self.layer)
 
-    def _init_weights(self, module):
-        if isinstance(module, nn.Linear):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.01)
-            if module.bias is not None:
-                torch.nn.init.zeros_(module.bias)
-        elif isinstance(module, nn.LayerNorm):
-            torch.nn.init.zeros_(module.bias)
-            torch.nn.init.ones_(module.weight)
+    def _init_mtp_weights(self, module):
+        """DeepSeek-style: Initialize MTP specific layers to be very 'quiet' at start."""
+        for m in module.modules():
+            if isinstance(m, nn.Linear):
+                # Use a very small std to keep initial predictions near-random
+                nn.init.normal_(m.weight, std=0.01)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.LayerNorm):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
 
     def forward(self, h_base, targets):
+        """
+        h_base: Hidden states from base model at t
+        targets: Actual tokens at t+1 (the hint)
+        Predicts: Tokens at t+2
+        """
+        # 1. Get embeddings for the 'hint' tokens (t+1)
         x_embed = self.embedding(targets)
         
-        fused = self.proj_h(h_base) + self.proj_emb(x_embed)
+        # 2. Mix: DeepSeek-V3 style additive fusion
+        # We use a 0.5 scale to keep the variance stable before LayerNorm
+        fused = (self.proj_h(h_base) + self.proj_emb(x_embed)) * 0.5
         x = self.ln_fusion(fused)
         
-        # FIX: Generate a Causal Mask to prevent the MTP layer from looking into the future
-        seq_length = x.size(1)
-        causal_mask = nn.Transformer.generate_square_subsequent_mask(
-            seq_length, device=x.device
-        )
+        # 3. Generate Causal Mask
+        # TransformerEncoderLayer expects a mask of shape (L, L) or (N*H, L, L)
+        sz = x.size(1)
+        mask = torch.triu(torch.ones(sz, sz, device=x.device) * float('-inf'), diagonal=1)
         
-        # Apply the mask. is_causal=True optimizes execution on PyTorch 2.0+
-        x_mtp = self.layer(x, src_mask=causal_mask, is_causal=True)
+        # 4. Process through MTP-specific Transformer block
+        # is_causal=True is a hint for flash attention if available
+        x_mtp = self.layer(x, src_mask=mask, is_causal=True)
         
+        # 5. Predict t+2 using the shared head
         logits = self.head(x_mtp)
         
         return logits, x_mtp

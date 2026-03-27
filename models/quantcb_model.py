@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
-from models.layers import QuantCB_Block, PositionalEncoding
+# Make sure to import RMSNorm from your layers file
+from models.layers import QuantCB_Block, PositionalEncoding, RMSNorm 
 from models.mtp_module import MTPModule
 
 class QuantCB_Model(nn.Module):
@@ -14,6 +15,10 @@ class QuantCB_Model(nn.Module):
         # 1. Base Components
         self.token_embedding = nn.Embedding(vocab_size, d_model)
         self.pos_encoding = PositionalEncoding(d_model)
+        
+        # FIX: Initialize embeddings to prevent massive initial logits 
+        # (Since this is tied to the lm_head, it dictates the starting loss)
+        nn.init.normal_(self.token_embedding.weight, std=0.02)
         
         # 2. Transformer Stack (MLA + MoE blocks)
         self.blocks = nn.ModuleList([
@@ -31,7 +36,8 @@ class QuantCB_Model(nn.Module):
         ])
         
         # 3. Final Norm and Tied Head
-        self.ln_f = nn.LayerNorm(d_model)
+        # FIX: Replaced LayerNorm with RMSNorm for architectural consistency
+        self.ln_f = RMSNorm(d_model)
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
 
         # Weight Tying: Prediction head shares weights with embeddings

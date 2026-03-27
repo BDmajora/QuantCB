@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+from typing import Optional, Tuple, List
 
 class QuantCB_Engine(nn.Module):
     """
@@ -28,64 +29,56 @@ class QuantCB_Engine(nn.Module):
         
         presents = [] if past_key_values is None else past_key_values
         new_presents = []
+        total_aux_loss = 0.0
         
         # 3. Transformer Blocks Execution
         for i, block in enumerate(self.model.blocks):
             layer_past = presents[i] if past_key_values is not None else None
-            x, present = block(x, mask=mask, layer_past=layer_past)
+            x, present, l_aux = block(x, mask=mask, layer_past=layer_past)
             new_presents.append(present)
+            total_aux_loss += l_aux
             
         x = self.model.ln_f(x)
         logits = self.model.lm_head(x) 
         
-        # 4. Loss Calculation (Multi-Objective)
+        # 4. Multi-Objective Loss Calculation
         loss = None
         if targets is not None:
-            # A. Main next-token prediction loss (t -> t+1)
+            # A. Main Next-Token Prediction (NTP)
             loss_main = F.cross_entropy(
                 logits.view(-1, logits.size(-1)), 
                 targets.view(-1)
             )
             
-            # B. MoE Auxiliary Loss (Load Balancing)
-            # We crawl the blocks to find the l_aux values we calculated in QuantCB_MoE
-            loss_aux = 0.0
-            for block in self.model.blocks:
-                if hasattr(block.moe, 'l_aux'):
-                    loss_aux += block.moe.l_aux
-            
-            # C. MTP logic: Predict token n+2 (Lookahead Task)
-            loss_mtp = 0.0
+            # B. MTP Logic: Multi-Token Prediction (Predict t+2)
             if seq_len > 1:
-                h_n = x[:, :-1, :]
-                hint_tokens = targets[:, :-1]
+                h_n = x[:, :-1, :] # Hidden states at t
+                target_next_plus_one = targets[:, 1:] # Tokens at t+2
                 
-                # Predict token at t+2
-                logits_mtp, _ = self.model.mtp(h_n, hint_tokens)
+                logits_mtp, _ = self.model.mtp(h_n, targets[:, :-1])
                 
                 loss_mtp = F.cross_entropy(
                     logits_mtp.reshape(-1, logits_mtp.size(-1)),
-                    targets[:, 1:].reshape(-1)
+                    target_next_plus_one.reshape(-1)
                 )
                 
-                # Combined Loss:
-                # 1.0 * Main + 0.1 * MTP (DeepSeek V3 ratio) + 0.01 * MoE Aux
-                loss = loss_main + (0.1 * loss_mtp) + (0.01 * loss_aux)
+                # Combined Loss: 1.0*NTP + 0.1*MTP + 0.01*MoE-Aux
+                loss = loss_main + (0.1 * loss_mtp) + (0.01 * total_aux_loss)
             else:
-                # Fallback for short sequences
-                loss = loss_main + (0.01 * loss_aux)
+                loss = loss_main + (0.01 * total_aux_loss)
             
         return logits, loss, new_presents
 
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None, top_p=None, repetition_penalty=1.0):
         """
-        Inference loop using the engine's forward logic.
+        Advanced inference loop with Top-K, Top-P, and Repetition Penalty.
         """
         self.model.eval()
         past_key_values = None
         
         for _ in range(max_new_tokens):
+            # Optimized KV-Caching Check
             if past_key_values is None:
                 idx_cond = idx
                 start_pos = 0
@@ -93,21 +86,46 @@ class QuantCB_Engine(nn.Module):
                 idx_cond = idx[:, -1:]
                 start_pos = idx.shape[1] - 1
                 
-            logits, _, past_key_values = self.forward(
+            logits, _, next_past_kv = self.forward(
                 idx_cond, 
                 past_key_values=past_key_values,
                 start_pos=start_pos
             )
+            past_key_values = next_past_kv
             
-            logits = logits[:, -1, :] / temperature
+            # 1. Focus on last token and apply temperature
+            logits = logits[:, -1, :] / max(temperature, 1e-5)
             
-            if top_k is not None:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = -float('Inf')
-            
+            # 2. Repetition Penalty
+            if repetition_penalty != 1.0:
+                for i in range(idx.shape[0]):
+                    for token_id in set(idx[i].tolist()):
+                        if logits[i, token_id] > 0:
+                            logits[i, token_id] /= repetition_penalty
+                        else:
+                            logits[i, token_id] *= repetition_penalty
+
+            # 3. Top-K Filtering
+            if top_k is not None and top_k > 0:
+                indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None]
+                logits[indices_to_remove] = -float('Inf')
+
+            # 4. Top-P (Nucleus) Filtering
+            if top_p is not None and top_p < 1.0:
+                sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+                cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+
+                sorted_indices_to_remove = cumulative_probs > top_p
+                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                sorted_indices_to_remove[..., 0] = 0
+
+                for i in range(idx.shape[0]):
+                    indices_to_remove = sorted_indices[i][sorted_indices_to_remove[i]]
+                    logits[i, indices_to_remove] = -float('Inf')
+
+            # 5. Sample and Concatenate
             probs = F.softmax(logits, dim=-1)
             idx_next = torch.multinomial(probs, num_samples=1)
-            
             idx = torch.cat((idx, idx_next), dim=1)
 
         return idx
