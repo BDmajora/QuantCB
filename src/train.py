@@ -14,12 +14,11 @@ def get_batch(data, batch_size, block_size, device):
 def train():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
-    # --- FIXED PATHING ---
+    # --- Pathing ---
     src_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(src_dir)
     output_dir = os.path.join(project_root, "modelOutput")
     os.makedirs(output_dir, exist_ok=True)
-    # ---------------------
 
     # 1. Data Loading
     data_path = os.path.join(output_dir, "input.txt")
@@ -31,41 +30,44 @@ def train():
     with open(data_path, 'r', encoding='utf-8') as f:
         raw_text = f.read()
 
-    # 2. Tokenizer (Rust acceleration)
+    # 2. Tokenizer (Fixed Vocab)
     vocab_size = 2048 
     tokenizer = QuantCB_Tokenizer()
     tok_path = os.path.join(output_dir, "tokenizer.json")
 
     if os.path.exists(tok_path):
-        print(f"Loading existing tokenizer from {tok_path}...")
         tokenizer.load(tok_path)
     else:
-        print("Training new tokenizer in Rust...")
         tokenizer.train(raw_text, target_vocab_size=vocab_size)
         tokenizer.save(tok_path)
 
-    # 3. Encoding (Now uses Rust encode_bpe)
-    print("Encoding dataset with Rust acceleration...")
+    # 3. Encoding
     encoded_data = tokenizer.encode(raw_text)
     data_tensor = torch.tensor(encoded_data, dtype=torch.long)
-    print(f"Encoded {len(data_tensor)} tokens.")
 
-    # 4. Model Setup
+    # 4. Model Setup (The Fair Benchmark)
+    # d_ff=512 * top_k=2 == 1024 active compute units
     model = QuantCB_Model(
         vocab_size=vocab_size, 
-        d_model=256, n_heads=8, d_ff=1024, n_layers=4,
-        latent_dim=128, head_dim=64
+        d_model=256, 
+        n_heads=8, 
+        d_ff=512,        
+        n_layers=4,
+        latent_dim=128, 
+        head_dim=64,
+        num_experts=8,
+        top_k=2
     ).to(device)
     
     optimizer = optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.1)
-    print(f"Model initialized on {device}. Training begins...")
+    print(f"Model initialized on {device}.")
+    print(f"Benchmark: MLA + MoE (8 Experts, 2 Active, {vocab_size} Vocab)")
 
     # 5. Training Loop
     model.train()
     for iter in range(501): 
         xb, yb = get_batch(data_tensor, 32, 128, device)
         
-        # FIXED: Added the underscore to catch and discard the MLA cache
         logits, loss, _ = model(xb, yb) 
         
         optimizer.zero_grad(set_to_none=True)
@@ -76,10 +78,10 @@ def train():
         if iter % 20 == 0:
             print(f"Step {iter}: Loss {loss.item():.4f}")
 
-    # Save to the root-level folder
+    # Save
     save_path = os.path.join(output_dir, 'quantcb_base.pth')
     torch.save(model.state_dict(), save_path)
-    print(f"Training complete. Model saved to {save_path}")
+    print(f"Training complete. Saved to {save_path}")
 
 if __name__ == "__main__":
     train()

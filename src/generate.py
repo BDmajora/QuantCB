@@ -25,6 +25,7 @@ def load_model_weights(model, checkpoint_path, device, is_int8=False):
         model.load_state_dict(dequantized_state_dict)
     else:
         print(f"\n--- Loading Base FP32 Checkpoint: {checkpoint_path} ---")
+        # Use weights_only=True for security and performance
         state_dict = torch.load(checkpoint_path, map_location=device, weights_only=True)
         model.load_state_dict(state_dict)
     
@@ -37,9 +38,10 @@ def generate():
     # Pathing Setup
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(script_dir) 
+    # Tokenizer is now stored in modelOutput
     tok_path = os.path.join(project_root, "modelOutput", "tokenizer.json")
 
-    # --- NEW INTERACTIVE CHOICE ---
+    # Interactive Model Selection
     print("Select Model Version:")
     print("[1] Base (FP32)")
     print("[2] Optimized (INT8)")
@@ -61,12 +63,18 @@ def generate():
         return
     tokenizer.load(tok_path)
     
-    # 2. Architecture (Keep these settings synced with your training)
+    # 2. Architecture (SYNCED WITH TRAINING: d_ff=512, experts=8, top_k=2)
     vocab_size = 2048 
     model = QuantCB_Model(
         vocab_size=vocab_size, 
-        d_model=256, n_heads=8, d_ff=1024, n_layers=4,
-        latent_dim=128, head_dim=64
+        d_model=256, 
+        n_heads=8, 
+        d_ff=512,         # MATCHES YOUR LATEST TRAINING RUN
+        n_layers=4,
+        latent_dim=128, 
+        head_dim=64,
+        num_experts=8,    # NEW: MoE parameter
+        top_k=2           # NEW: MoE parameter
     ).to(device)
 
     # 3. Load Weights
@@ -77,17 +85,19 @@ def generate():
         return
 
     # 4. The Actual Generation
+    # Start with a sequence of 0 (usually the [PAD] or [BOS] token)
     context = torch.zeros((1, 1), dtype=torch.long, device=device) 
     
-    print(f"\nGenerating 300 tokens...\n" + "="*40)
+    print(f"\nGenerating 300 tokens (MLA + MoE Engine)...\n" + "="*40)
     
     with torch.no_grad():
+        # MLA Cache is handled internally within model.generate
         generated_ids = model.generate(context, max_new_tokens=300)[0].tolist()
     
     # 5. Decode
     output_text = tokenizer.decode(generated_ids)
     print(output_text)
-    print("="*40)
+    print("\n" + "="*40)
 
 if __name__ == "__main__":
     generate()
