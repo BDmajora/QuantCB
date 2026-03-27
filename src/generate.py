@@ -9,6 +9,7 @@ def load_model_weights(model, checkpoint_path, device, is_fp8=False):
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Could not find checkpoint at {checkpoint_path}")
 
+    # Use weights_only=True for security/stability unless you have custom classes saved
     if is_fp8:
         print(f"\n--- Loading Optimized FP8 Checkpoint: {checkpoint_path} ---")
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
@@ -37,7 +38,11 @@ def load_model_weights(model, checkpoint_path, device, is_fp8=False):
     else:
         print(f"\n--- Loading Base FP32 Checkpoint: {checkpoint_path} ---")
         state_dict = torch.load(checkpoint_path, map_location=device, weights_only=True)
-        model.load_state_dict(state_dict, strict=False)
+        # Standard checkpoints might be wrapped in a 'model_state_dict' key
+        if 'model_state_dict' in state_dict:
+            model.load_state_dict(state_dict['model_state_dict'], strict=True)
+        else:
+            model.load_state_dict(state_dict, strict=True)
     
     model.eval()
     return model
@@ -69,15 +74,15 @@ def generate():
         return
     tokenizer.load(tok_path)
     
-    vocab_size = len(tokenizer.vocab) if hasattr(tokenizer, 'vocab') else 2048 
+    vocab_size = 2048 # Keeping this consistent with your training script
     
-    # CHANGED: d_ff updated to 1024 to match your checkpoint
+    # FIXED: Parameters updated to match the checkpoint's internal shapes
     raw_model = QuantCB_Model(
         vocab_size=vocab_size, 
-        d_model=256, 
-        n_heads=8, 
-        d_ff=1024,         
-        n_layers=4,
+        d_model=384,      # Matches checkpoint size mismatch error
+        n_layers=6,       # Matches checkpoint layer count (0 through 5)
+        d_ff=1024,        # Standard for your architecture
+        n_heads=8,        # Standard for your d_model
         latent_dim=128, 
         head_dim=64,
         num_experts=8,    
@@ -97,7 +102,8 @@ def generate():
     print(f"\nGenerating 300 tokens (MLA + MoE + MTP Architecture)...\n" + "="*40)
     
     with torch.no_grad():
-        generated_ids = engine.generate(context, max_new_tokens=300)[0].tolist()
+        # Using temperature and top_p here is recommended for better quality
+        generated_ids = engine.generate(context, max_new_tokens=300, temperature=0.8)[0].tolist()
     
     output_text = tokenizer.decode(generated_ids)
     print(output_text)

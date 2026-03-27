@@ -8,5 +8,7 @@ name = "quantcb_rust"
 crate-type = ["cdylib"]
 
 [dependencies]
-# Updated to 0.22.2 for better 3.13 support
+# PyO3 0.22.2 for Python 3.13 support
 pyo3 = { version = "0.22.2", features = ["extension-module", "abi3-py312"] }
+# Fast, non-cryptographic hashing for integer pairs
+rustc-hash = "1.1.0"

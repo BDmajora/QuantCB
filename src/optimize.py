@@ -40,7 +40,7 @@ def run_quantization():
     project_root = os.path.dirname(script_dir)
     output_dir = os.path.join(project_root, "modelOutput")
     
-    checkpoint_path = os.path.join(output_dir, 'quantcb_base.pth')
+    checkpoint_path = os.path.join(output_dir, 'quantcb_final.pth')
     # Updated output path for FP8
     output_path = os.path.join(output_dir, 'quantcb_fp8.pth')
     
