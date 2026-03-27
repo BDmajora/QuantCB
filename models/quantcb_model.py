@@ -8,41 +8,42 @@ class QuantCB_Model(nn.Module):
         super().__init__()
         self.d_model = d_model
         
-        # 1. Input: Token IDs -> Continuous Vectors
         self.token_embedding = nn.Embedding(vocab_size, d_model)
         self.pos_encoding = PositionalEncoding(d_model)
         
-        # 2. Backbone: Stacked Transformer Blocks using MLA
         self.blocks = nn.ModuleList([
             QuantCB_Block(d_model, n_heads, d_ff, latent_dim, head_dim, dropout) 
             for _ in range(n_layers)
         ])
         
-        # 3. Output Head: Hidden States -> Vocab Probabilities
         self.ln_f = nn.LayerNorm(d_model)
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
 
-        # Weight Tying (Saves ~50MB of VRAM for 50k vocab)
         self.token_embedding.weight = self.lm_head.weight
 
-    def forward(self, idx, targets=None, mask=None):
+    def forward(self, idx, targets=None, mask=None, past_key_values=None, start_pos=0):
         batch, seq_len = idx.shape
         device = idx.device
         
-        # Internal Causal Masking
-        if mask is None:
+        # Only apply causal mask if processing a sequence > 1 without cache
+        if mask is None and seq_len > 1 and past_key_values is None:
             mask = torch.tril(torch.ones(seq_len, seq_len, device=device)).view(1, 1, seq_len, seq_len)
+        elif past_key_values is not None:
+            mask = None # Single token generation doesn't need masking against the past
 
-        # Forward through embeddings and encoding
         x = self.token_embedding(idx) * math.sqrt(self.d_model)
-        x = self.pos_encoding(x)
+        x = self.pos_encoding(x, start_pos=start_pos)
         
-        # Forward through the block stack
-        for block in self.blocks:
-            x = block(x, mask=mask)
+        presents = [] if past_key_values is None else past_key_values
+        new_presents = []
+        
+        for i, block in enumerate(self.blocks):
+            layer_past = presents[i] if past_key_values is not None else None
+            x, present = block(x, mask=mask, layer_past=layer_past)
+            new_presents.append(present)
             
         x = self.ln_f(x)
-        logits = self.lm_head(x) # (Batch, Seq, Vocab_Size)
+        logits = self.lm_head(x) 
         
         loss = None
         if targets is not None:
@@ -51,37 +52,42 @@ class QuantCB_Model(nn.Module):
                 targets.view(-1)
             )
             
-        return logits, loss
+        return logits, loss, new_presents
 
     @torch.no_grad()
     def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
         """
-        Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
-        the sequence max_new_tokens times, feeding the predictions back into the model each time.
+        Optimized generation utilizing the MLA Latent Cache.
         """
-        for _ in range(max_new_tokens):
-            # If the sequence context becomes too long for the Positional Encoding, crop it
-            # (Adjust '1024' based on your PositionalEncoding's max_len)
-            idx_cond = idx if idx.size(1) <= 1024 else idx[:, -1024:]
+        self.eval()
+        past_key_values = None
+        
+        for i in range(max_new_tokens):
+            if past_key_values is None:
+                # First step: process the full initial context
+                idx_cond = idx
+                start_pos = 0
+            else:
+                # Subsequent steps: process ONLY the last generated token
+                idx_cond = idx[:, -1:]
+                start_pos = idx.size(1) - 1
+                
+            # Forward pass returning the updated cache
+            logits, _, past_key_values = self(
+                idx_cond, 
+                past_key_values=past_key_values,
+                start_pos=start_pos
+            )
             
-            # Forward the model to get the logits for the index in the sequence
-            logits, _ = self(idx_cond)
-            
-            # Focus only on the last time step and scale by temperature
             logits = logits[:, -1, :] / temperature
             
-            # Optional: crop the distribution to only top k options
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = -float('Inf')
             
-            # Apply softmax to convert logits to (normalized) probabilities
             probs = torch.softmax(logits, dim=-1)
-            
-            # Sample from the distribution
             idx_next = torch.multinomial(probs, num_samples=1)
             
-            # Append sampled index to the running sequence and continue
             idx = torch.cat((idx, idx_next), dim=1)
 
         return idx

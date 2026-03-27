@@ -15,11 +15,8 @@ def train():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
     # --- FIXED PATHING ---
-    # 1. Get the 'src' directory
     src_dir = os.path.dirname(os.path.abspath(__file__))
-    # 2. Get the actual project root (one level up)
     project_root = os.path.dirname(src_dir)
-    # 3. Point to the root-level modelOutput
     output_dir = os.path.join(project_root, "modelOutput")
     os.makedirs(output_dir, exist_ok=True)
     # ---------------------
@@ -39,7 +36,6 @@ def train():
     tokenizer = QuantCB_Tokenizer()
     tok_path = os.path.join(output_dir, "tokenizer.json")
 
-    # If you moved the files manually, this will now find them in root/modelOutput
     if os.path.exists(tok_path):
         print(f"Loading existing tokenizer from {tok_path}...")
         tokenizer.load(tok_path)
@@ -66,10 +62,11 @@ def train():
 
     # 5. Training Loop
     model.train()
-    # Bumped to 501 so you get a few more steps of 'cooking'
     for iter in range(501): 
         xb, yb = get_batch(data_tensor, 32, 128, device)
-        logits, loss = model(xb, yb)
+        
+        # FIXED: Added the underscore to catch and discard the MLA cache
+        logits, loss, _ = model(xb, yb) 
         
         optimizer.zero_grad(set_to_none=True)
         loss.backward()

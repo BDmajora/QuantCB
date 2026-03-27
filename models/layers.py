@@ -14,8 +14,10 @@ class PositionalEncoding(nn.Module):
         pe[:, 1::2] = torch.cos(position * div_term)
         self.register_buffer('pe', pe.unsqueeze(0))
 
-    def forward(self, x):
-        return x + self.pe[:, :x.size(1)]
+    def forward(self, x, start_pos=0):
+        # Applies correct position encoding even when x is just the single newest token
+        seq_len = x.size(1)
+        return x + self.pe[:, start_pos:start_pos + seq_len]
 
 class QuantCB_FFN(nn.Module):
     def __init__(self, d_model, d_ff, dropout=0.1):
@@ -32,15 +34,14 @@ class QuantCB_Block(nn.Module):
     def __init__(self, d_model, n_heads, d_ff, latent_dim=128, head_dim=64, dropout=0.1):
         super().__init__()
         self.ln_1 = nn.LayerNorm(d_model)
-        # Swapped QuantCB_Attention for MLA_Attention
         self.attn = MLA_Attention(d_model, n_heads, latent_dim, head_dim)
         
         self.ln_2 = nn.LayerNorm(d_model)
         self.ffn = QuantCB_FFN(d_model, d_ff, dropout)
 
-    def forward(self, x, mask=None):
-        # Communication Sub-layer (MLA)
-        x = x + self.attn(self.ln_1(x), mask=mask)
-        # Computation Sub-layer (FFN)
+    def forward(self, x, mask=None, layer_past=None):
+        # MLA Attention now returns the output AND the latent cache
+        attn_out, present = self.attn(self.ln_1(x), mask=mask, layer_past=layer_past)
+        x = x + attn_out
         x = x + self.ffn(self.ln_2(x))
-        return x
+        return x, present
