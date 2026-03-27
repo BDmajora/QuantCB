@@ -3,24 +3,40 @@ import os
 from models.quantcb_model import QuantCB_Model
 from tokenizer_basic import QuantCB_Tokenizer
 
-def load_model_weights(model, checkpoint_path, device, is_int8=False):
-    """Handles loading either standard FP32 or Quantized INT8 weights."""
+def load_model_weights(model, checkpoint_path, device, is_fp8=False):
+    """Handles loading either standard FP32 or Quantized FP8 weights."""
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Could not find checkpoint at {checkpoint_path}")
 
-    if is_int8:
-        print(f"\n--- Loading Optimized INT8 Checkpoint: {checkpoint_path} ---")
+    if is_fp8:
+        print(f"\n--- Loading Optimized FP8 Checkpoint: {checkpoint_path} ---")
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
         q_weights = checkpoint['weights']
-        scales = checkpoint['scales']
+        scales_dict = checkpoint['scales']
         
-        # Dequantize weights back to FP32 for inference
+        # Dequantize FP8 weights back to FP32 for inference
         dequantized_state_dict = {}
         for name, param in q_weights.items():
-            if f"{name}_scale" in scales:
-                dequantized_state_dict[name] = param.float() * scales[f"{name}_scale"]
+            scale_key = f"{name}_scales"
+            if scale_key in scales_dict:
+                # Move tensor and scales to target device
+                param = param.to(device)
+                scale_tensor = scales_dict[scale_key].to(device)
+                
+                original_shape = param.shape
+                
+                # Infer the group size based on the number of scales saved
+                num_groups = scale_tensor.numel()
+                group_size = param.numel() // num_groups
+                
+                # Reshape, cast to FP32, apply the fine-grained scales, and reshape back
+                param_float = param.view(-1, group_size).float()
+                scale_expanded = scale_tensor.view(-1, 1)
+                
+                dequantized = (param_float * scale_expanded).view(original_shape)
+                dequantized_state_dict[name] = dequantized
             else:
-                dequantized_state_dict[name] = param 
+                dequantized_state_dict[name] = param.to(device)
         
         model.load_state_dict(dequantized_state_dict)
     else:
@@ -44,15 +60,15 @@ def generate():
     # Interactive Model Selection
     print("Select Model Version:")
     print("[1] Base (FP32)")
-    print("[2] Optimized (INT8)")
+    print("[2] Optimized (FP8)")
     choice = input("Enter 1 or 2: ").strip()
 
     if choice == '2':
-        filename = "quantcb_int8.pth"
-        is_int8 = True
+        filename = "quantcb_fp8.pth"
+        is_fp8 = True
     else:
         filename = "quantcb_base.pth"
-        is_int8 = False
+        is_fp8 = False
 
     model_path = os.path.join(project_root, "modelOutput", filename)
 
@@ -69,17 +85,17 @@ def generate():
         vocab_size=vocab_size, 
         d_model=256, 
         n_heads=8, 
-        d_ff=512,         # MATCHES YOUR LATEST TRAINING RUN
+        d_ff=512,         
         n_layers=4,
         latent_dim=128, 
         head_dim=64,
-        num_experts=8,    # NEW: MoE parameter
-        top_k=2           # NEW: MoE parameter
+        num_experts=8,    
+        top_k=2           
     ).to(device)
 
     # 3. Load Weights
     try:
-        model = load_model_weights(model, model_path, device, is_int8=is_int8)
+        model = load_model_weights(model, model_path, device, is_fp8=is_fp8)
     except Exception as e:
         print(f"Error loading model: {e}")
         return
