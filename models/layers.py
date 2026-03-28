@@ -4,8 +4,9 @@ import torch.nn.functional as F
 import math
 from typing import Optional, Tuple
 
-# Use the dot (.) for a relative import from the same folder
+# Import MLA from attention and RoPE utilities from the new rope.py
 from .attention import MLA_Attention
+from .rope import DynamicNTKRotaryEmbedding, apply_rotary_pos_emb
 
 class RMSNorm(nn.Module):
     def __init__(self, d_model: int, eps: float = 1e-6):

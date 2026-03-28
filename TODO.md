@@ -14,15 +14,6 @@
 | **Process-Level Reward** | Qwen Math / ProcessBench | Fixes logic mid-step. | Trains the model to check its work, not just guess. |
 
 ---
-
-## Phase 1: Dataset Purification & "Negative Mirror" Training
-
-- [ ] **Curate High-Density Data:** Replace the noisy Wikipedia chunks with "Master-Level" text (Shakespeare, NT Kernel Source, or specialized technical manuals).
-- [ ] **Domain-Specific Tokenization:** Re-train a smaller, custom tokenizer (BPE) specifically for your target data to eliminate "Wiki-noise" characters.
-- [ ] **The "Negative Mirror" Dataset:** - [ ] Take 5% of training data and intentionally corrupt it (swap nouns/logic).
-    - [ ] Wrap corrupted segments in `<|hallucinate|>` tags and clean segments in `<|truth|>` tags.
-- [ ] **Contrastive Training:** Reward the model for identifying the boundary between the "Slop" and the "Truth," effectively training an internal hallucination auditor.
-
 ## Phase 2: Architectural Depth (The "Thinking" Loop)
 
 - [ ] **Implement Recurrent Layers:** Modify the forward pass to allow a single block of 8 Experts to process the same hidden state multiple times (Shared-Weight Recursion).

@@ -2,14 +2,23 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+from typing import Optional, Tuple
+
+# Import the Dynamic RoPE components from your layers file
+from .rope import DynamicNTKRotaryEmbedding, apply_rotary_pos_emb
 
 class MLA_Attention(nn.Module):
-    def __init__(self, d_model, n_heads, latent_dim=128, head_dim=64):
+    def __init__(self, d_model: int, n_heads: int, latent_dim: int = 128, head_dim: int = 64):
         super().__init__()
         self.n_heads = n_heads
         self.head_dim = head_dim
         self.latent_dim = latent_dim
         
+        # Split head_dim: half for content, half for rotary positional info
+        self.qk_rope_dim = head_dim // 2 
+        self.qk_nope_dim = head_dim - self.qk_rope_dim
+        
+        # Projections
         self.W_q = nn.Linear(d_model, n_heads * head_dim, bias=False)
         self.W_dkv = nn.Linear(d_model, latent_dim, bias=False)
         self.ln_kv = nn.LayerNorm(latent_dim)
@@ -18,42 +27,25 @@ class MLA_Attention(nn.Module):
         self.W_uv = nn.Linear(latent_dim, n_heads * head_dim, bias=False)
         self.W_o = nn.Linear(n_heads * head_dim, d_model, bias=False)
 
-        # Precompute the inverse frequencies for RoPE
-        # We register this as a buffer so it automatically moves to CPU/CUDA with the model
-        inv_freq = 1.0 / (10000.0 ** (torch.arange(0, head_dim, 2).float() / head_dim))
-        self.register_buffer("inv_freq", inv_freq)
+        # Dynamic RoPE Scaling (NTK-aware)
+        self.rope = DynamicNTKRotaryEmbedding(self.qk_rope_dim, max_position_embeddings=256)
 
-    def apply_rope(self, x, seq_len, offset=0):
-        # x shape: (batch, n_heads, seq_len, head_dim)
-        t = torch.arange(offset, offset + seq_len, device=x.device).type_as(self.inv_freq)
-        freqs = torch.outer(t, self.inv_freq)
-        freqs = torch.cat((freqs, freqs), dim=-1)
-        
-        # Reshape for broadcasting across batch and heads
-        freqs = freqs.unsqueeze(0).unsqueeze(0)
-        
-        # Rotate half the dimensions
-        d = x.shape[-1] // 2
-        x_half1, x_half2 = x[..., :d], x[..., d:]
-        rotated_x = torch.cat((-x_half2, x_half1), dim=-1)
-        
-        # Apply sine and cosine to bake the position into the tensor
-        return (x * freqs.cos()) + (rotated_x * freqs.sin())
-
-    def forward(self, x, mask=None, layer_past=None):
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None, 
+                layer_past: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         batch_size, seq_len, _ = x.shape
         
-        # 1. Generate Queries
+        # 1. Generate Queries and split into Nope/Rope
         q = self.W_q(x).view(batch_size, seq_len, self.n_heads, self.head_dim)
-        q = q.transpose(1, 2) 
+        q_nope, q_pe = q.split([self.qk_nope_dim, self.qk_rope_dim], dim=-1)
+        q_nope = q_nope.transpose(1, 2)
+        q_pe = q_pe.transpose(1, 2)
         
         # 2. Compress current tokens to Latent Vector
         c_kv = self.ln_kv(self.W_dkv(x)) 
         
-        # 3. Cache Update
+        # 3. KV Cache Update
         if layer_past is not None:
             c_kv = torch.cat([layer_past, c_kv], dim=1)
-            
         present_c_kv = c_kv 
         
         # 4. Expand Latent Vector to Keys and Values
@@ -61,17 +53,28 @@ class MLA_Attention(nn.Module):
         k = self.W_uk(c_kv).view(batch_size, full_seq_len, self.n_heads, self.head_dim)
         v = self.W_uv(c_kv).view(batch_size, full_seq_len, self.n_heads, self.head_dim)
         
-        k = k.transpose(1, 2) 
-        v = v.transpose(1, 2) 
+        # Split Keys into Nope/Rope
+        k_nope, k_pe = k.split([self.qk_nope_dim, self.qk_rope_dim], dim=-1)
         
-        # 5. Apply Rotary Position Embeddings
-        # Calculate offset in case we are in the middle of generation using a KV cache
-        offset = full_seq_len - seq_len
-        q = self.apply_rope(q, seq_len, offset)
-        k = self.apply_rope(k, full_seq_len, offset=0)
+        k_nope = k_nope.transpose(1, 2)
+        k_pe = k_pe.transpose(1, 2)
+        v = v.transpose(1, 2)
+        
+        # 5. Apply Dynamic RoPE to the positional parts
+        # Fetch cos/sin based on the full sequence length (including cache)
+        cos, sin = self.rope(v, full_seq_len)
+        
+        # Apply RoPE to current query window
+        q_pe, _ = apply_rotary_pos_emb(q_pe, q_pe, cos[:, :, -seq_len:, :], sin[:, :, -seq_len:, :])
+        # Apply RoPE to all keys in the buffer
+        _, k_pe = apply_rotary_pos_emb(k_pe, k_pe, cos, sin)
+        
+        # Re-concatenate positional and non-positional components
+        q_final = torch.cat([q_nope, q_pe], dim=-1)
+        k_final = torch.cat([k_nope, k_pe], dim=-1)
         
         # 6. Attention Computation
-        attn_scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        attn_scores = torch.matmul(q_final, k_final.transpose(-2, -1)) / math.sqrt(self.head_dim)
         
         if mask is not None:
             if mask.dtype == torch.bool:

@@ -45,3 +45,15 @@ class QuantCB_Model(nn.Module):
             embedding=self.token_embedding,
             head=self.lm_head
         )
+
+        # 5. Latent Probing Head
+        # Projects d_model to a hallucination/drift score for the Ouro_Engine
+        self.latent_probe = nn.Linear(d_model, 1, bias=False)
+        nn.init.normal_(self.latent_probe.weight, std=0.02)
+
+    def get_hallucination_score(self, h_n):
+        """
+        Inspects the latent state to detect logic drift.
+        Used by the engine to decide on early exits or re-loops.
+        """
+        return torch.sigmoid(self.latent_probe(h_n))
