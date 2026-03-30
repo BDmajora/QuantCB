@@ -12,7 +12,7 @@ def cleanup_project():
         print(f"--- modelOutput folder not found at {output_dir} ---")
         return
 
-    print(f"\n⚠️  WARNING: This will delete everything in {output_dir}")
+    print(f"\n WARNING: This will delete everything in {output_dir}")
     confirm = input("Are you sure? (y/n): ").strip().lower()
     
     if confirm == 'y':
