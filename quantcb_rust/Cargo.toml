@@ -8,7 +8,14 @@ name = "quantcb_rust"
 crate-type = ["cdylib"]
 
 [dependencies]
-# PyO3 0.22.2 for Python 3.13 support
 pyo3 = { version = "0.22.2", features = ["extension-module", "abi3-py312"] }
-# Fast, non-cryptographic hashing for integer pairs
 rustc-hash = "1.1.0"
+
+# Upgrade to 0.8.2 - This version supports the newer rand/half traits
+candle-core = "0.8.2"
+candle-nn = "0.8.2"
+
+# Let Cargo pick the best versions of these now that Candle is modern
+rand = "0.8.5"
+rand_distr = "0.4.3"
+half = { version = "2.4", features = ["num-traits", "rand_distr"] }

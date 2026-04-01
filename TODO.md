@@ -13,14 +13,6 @@
 | **Online Merging Optimizers** | Qwen Alignment Research | Mitigates alignment tax. | Boosts reward model performance during fine-tuning. |
 | **Process-Level Reward** | Qwen Math / ProcessBench | Fixes logic mid-step. | Trains the model to check its work, not just guess. |
 
----
-## Phase 2: Architectural Depth (The "Thinking" Loop)
-
-- [ ] **Implement Recurrent Layers:** Modify the forward pass to allow a single block of 8 Experts to process the same hidden state multiple times (Shared-Weight Recursion).
-- [ ] **Add an "Exit" Gate:** Implement a "Confidence Neuron" that allows the model to stop looping once the loss for the next-token prediction hits a certain threshold.
-- [ ] **Weighted Residual Connections:** Update the skip-connections so the model can "re-read" its own previous internal reasoning before committing to a token.
-- [ ] **Self-Lengthening Context:** (Inspired by *Qwen Self-Lengthen*) Add dynamic scaling to the RoPE (Rotary Position Embeddings) to allow longer context during inference.
-
 ## Phase 3: Hierarchical Reasoning (The "System 2" Brain)
 
 - [ ] **Chunk-Level Attention:** Add a secondary attention mechanism that looks at groups of 16–32 tokens as a single "concept" node.
