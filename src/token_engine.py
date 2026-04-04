@@ -1,87 +1,62 @@
-import torch
-import os
+import re
+from collections import Counter, defaultdict
 
 class TokenEngine:
     def __init__(self, device="cpu"):
-        # On the X13s, CPU with multi-threading is often faster for BPE 
-        # than Vulkan because of the constant memory shuffling.
-        self.device = torch.device(device)
-        
-        # ENGAGE ALL CORES: Snapdragon X13s has 8 cores. 
-        # We'll reserve 1 for system stability and use 7 for the engine.
-        torch.set_num_threads(7)
-        print(f"TokenEngine engaged with {torch.get_num_threads()} threads.")
-            
-    def train_bpe(self, text_bytes, target_vocab_size):
-        num_merges = target_vocab_size - 256
-        if num_merges <= 0:
-            return []
+        # We keep the device param for compatibility, 
+        # but BPE training logic is now algorithmically optimized in CPU/RAM.
+        pass
 
-        # Use long for IDs to prevent overflow during the packing trick
-        ids = torch.tensor(list(text_bytes), dtype=torch.long, device=self.device)
+    def get_stats(self, vocab):
+        """Finds frequencies of all adjacent pairs."""
+        pairs = Counter()
+        for word, freq in vocab.items():
+            symbols = word.split()
+            for i in range(len(symbols) - 1):
+                pairs[symbols[i], symbols[i+1]] += freq
+        return pairs
+
+    def merge_vocab(self, pair, v_in):
+        """Merges the most frequent pair across the unique word dictionary."""
+        v_out = {}
+        bigram = re.escape(' '.join(pair))
+        p = re.compile(r'(?<!\S)' + bigram + r'(?!\S)')
+        new_token = ''.join(pair)
+        
+        for word in v_in:
+            w_out = p.sub(new_token, word)
+            v_out[w_out] = v_in[word]
+        return v_out
+
+    def train_bpe(self, text, target_vocab_size):
+        # Initial vocabulary: count unique words and space-separate their bytes
+        # We add a special end-of-word token or just work with raw byte strings
+        words = re.findall(r'\S+|\s+', text)
+        word_freqs = Counter(words)
+        
+        # Represent words as space-separated tokens of hex/bytes
+        # e.g., "hello" -> "h e l l o"
+        vocab = {" ".join(list(word)): freq for word, freq in word_freqs.items()}
+        
         merges = []
+        num_merges = target_vocab_size - 256
 
         for i in range(num_merges):
-            if ids.numel() < 2:
+            pairs = self.get_stats(vocab)
+            if not pairs:
+                break
+            
+            best = max(pairs, key=pairs.get)
+            if pairs[best] < 2:
                 break
 
-            # 1. Parallel Counting (The Packing Trick)
-            # This part is already fast, but now it's multi-threaded
-            packed = ids[:-1] * 1000000 + ids[1:]
-            counts = torch.bincount(packed)
+            vocab = self.merge_vocab(best, vocab)
             
-            if counts.numel() == 0: break
-            best_packed = torch.argmax(counts).item()
+            # Convert string representations back to integer IDs for the Tokenizer
+            # This logic assumes the Tokenizer handles the ID mapping
+            merges.append(best)
             
-            if counts[best_packed] < 2: break 
-
-            p0, p1 = best_packed // 1000000, best_packed % 1000000
-            new_id = 256 + i
-            merges.append(((p0, p1), new_id))
-
-            # 2. VECTORIZED MERGE (The Speed Fix)
-            # Instead of a Python loop, we find masks.
-            # mask finds the first part of the pair
-            mask = (ids[:-1] == p0) & (ids[1:] == p1)
-            
-            # We need to handle overlapping merges (e.g., 'aaa' -> 'X a')
-            # This logic prevents merging the same token twice in one pass
-            mask_shifted = torch.cat([torch.tensor([False], device=self.device), mask[:-1]])
-            final_mask = mask & ~mask_shifted 
-            
-            # Create the new sequence without Python loops
-            # We keep everything except the 'p1' parts of the pairs we merged
-            keep_mask = torch.ones_like(ids, dtype=torch.bool)
-            # Find indices of the second element in the pair and mark them for deletion
-            remove_indices = torch.where(final_mask)[0] + 1
-            keep_mask[remove_indices] = False
-            
-            # Update the values at the first element positions
-            ids_copy = ids.clone()
-            ids_copy[torch.where(final_mask)[0]] = new_id
-            
-            # Filter the tensor
-            ids = ids_copy[keep_mask]
-
-            if i % 10 == 0:
-                print(f"Merge {i+1}/{num_merges}: Learned ({p0}, {p1}) -> {new_id} | Tokens remaining: {ids.numel()}")
+            if i % 50 == 0 or i == num_merges - 1:
+                print(f"Merge {i+1}/{num_merges}: {best} | Unique words in dict: {len(vocab)}")
 
         return merges
-
-    def encode_bpe(self, tokens, merges_sequence):
-        # Even for encoding, we use tensors to stay off Core 1
-        ids = torch.tensor(tokens, dtype=torch.long, device=self.device)
-        
-        for (p0, p1), new_id in merges_sequence:
-            mask = (ids[:-1] == p0) & (ids[1:] == p1)
-            mask_shifted = torch.cat([torch.tensor([False], device=self.device), mask[:-1]])
-            final_mask = mask & ~mask_shifted
-            
-            keep_mask = torch.ones_like(ids, dtype=torch.bool)
-            remove_indices = torch.where(final_mask)[0] + 1
-            keep_mask[remove_indices] = False
-            
-            ids[torch.where(final_mask)[0]] = new_id
-            ids = ids[keep_mask]
-            
-        return ids.tolist()
