@@ -7,7 +7,7 @@ from lr_scheduler import get_lr
 from data_engine import load_and_tag_all_data, get_batch
 from models.quantcb_model import QuantCB_Model
 from models.ouro_engine import Ouro_Engine 
-from tokenizer_basic import QuantCB_Tokenizer
+from tokenizer import Tokenizer
 
 # Define a path for the tokenizer cache inside modelOutput
 TOKENIZER_PATH = os.path.join(OUTPUT_DIR, "quantcb_tokenizer.json")
@@ -19,7 +19,7 @@ def train():
     raw_text = load_and_tag_all_data()
     
     # 2. Tokenizer Lifecycle (Load or Train)
-    tokenizer = QuantCB_Tokenizer(device="cpu") # Multi-threaded CPU is best for BPE
+    tokenizer = Tokenizer(device="cpu") # Multi-threaded CPU is best for BPE
     
     if tokenizer.load(TOKENIZER_PATH):
         print("Using cached tokenizer.")
