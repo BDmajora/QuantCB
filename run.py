@@ -6,6 +6,7 @@ import shutil
 def cleanup_project():
     """Clears out the modelOutput folder to prepare for a fresh run."""
     project_root = os.getcwd()
+    # Ensure this matches the OUTPUT_DIR in your config
     output_dir = os.path.join(project_root, "modelOutput")
     
     if not os.path.exists(output_dir):
@@ -16,10 +17,8 @@ def cleanup_project():
     confirm = input("Are you sure? (y/n): ").strip().lower()
     
     if confirm == 'y':
-        # List all files to be deleted
         files = os.listdir(output_dir)
         for f in files:
-            # Avoid deleting the .gitignore if it exists in that folder
             if f == ".gitignore":
                 continue
             
@@ -46,7 +45,6 @@ def run_engine_auto():
     # Automatically find all operational scripts in src/
     scripts = sorted([f for f in os.listdir(src_dir) if f.endswith(".py") and not f.startswith("__")])
     
-    # Define the index for the cleanup option
     cleanup_index = len(scripts)
 
     print("\n--- QuantCB Source Runner ---")
@@ -62,17 +60,29 @@ def run_engine_auto():
         choice = int(user_input)
         
         if 0 <= choice < len(scripts):
-            # Run a standard script
             selected_file = scripts[choice]
+            
+            # --- FIX: Setup Environment for Real-Time Output ---
             env = os.environ.copy()
+            
+            # This flag prevents Python from buffering stdout. 
+            # Without this, you won't see logs until the buffer fills up.
+            env["PYTHONUNBUFFERED"] = "1" 
+            
             root_dir = os.getcwd()
-            env["PYTHONPATH"] = root_dir + os.pathsep + os.path.join(root_dir, src_dir) + os.pathsep + env.get("PYTHONPATH", "")
+            # Construct PYTHONPATH so local imports work correctly
+            env["PYTHONPATH"] = (
+                root_dir + os.pathsep + 
+                os.path.join(root_dir, src_dir) + os.pathsep + 
+                env.get("PYTHONPATH", "")
+            )
 
             print(f"\n>> Executing src/{selected_file}...")
+            
+            # subprocess.run blocks execution until the child script finishes
             subprocess.run([sys.executable, os.path.join(src_dir, selected_file)], env=env)
         
         elif choice == cleanup_index:
-            # Run the cleanup logic
             cleanup_project()
             
         else:

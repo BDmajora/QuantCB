@@ -20,7 +20,6 @@ def generate_mano_task(num_samples=1000):
         a, b, c = random.sample(entities, 3)
         
         # Chain of Thought (CoT) construction
-        # Format: <|truth|> <|reasoning|> If A goes to B, and B goes to C, then A leads to C.
         text = f"If {a} goes to {b}, and {b} goes to {c}, then {a} leads to {c}."
         
         tag = TAGS['truth'] if random.random() > CORRUPTION_RATE else TAGS['hallucinate']
@@ -96,10 +95,6 @@ def load_and_tag_all_data():
 # --- STRESS TESTING UTILITY ---
 
 def extrapolation_test(engine, tokenizer, test_prompt="If Alpha goes to Bravo, and Bravo goes to Charlie, then Alpha leads to", loops=8):
-    """
-    Stress test: Force engine to 8 loops (beyond training bounds).
-    Measure if logic preservation (entropy) holds or diverges via Dynamic RoPE.
-    """
     print(f"\n--- EXTRAPOLATION TEST: {loops} LOOPS ---")
     original_max_loops = engine.max_loops
     engine.max_loops = loops
@@ -114,12 +109,26 @@ def extrapolation_test(engine, tokenizer, test_prompt="If Alpha goes to Bravo, a
     print(f"Prompt: {test_prompt}")
     print(f"Response: {decoded}")
     
-    # Restore original configuration
     engine.max_loops = original_max_loops
     return decoded
 
 def get_batch(data, batch_size, block_size, device):
+    """
+    Vectorized indexing: Bypasses Python list comprehensions to achieve
+    C-level memory slicing speeds.
+    """
+    # 1. Generate starting indices for each sequence in the batch
     ix = torch.randint(len(data) - block_size - 1, (batch_size,))
-    x = torch.stack([data[i:i+block_size] for i in ix])
-    y = torch.stack([data[i+1:i+block_size+1] for i in ix])
-    return x.to(device), y.to(device)
+    
+    # 2. Create a 2D grid of indices [batch_size, block_size]
+    # ix.unsqueeze(1) is [batch_size, 1]
+    # torch.arange(block_size) is [block_size]
+    # Broadcasting creates the full coordinate map
+    indices = ix.unsqueeze(1) + torch.arange(block_size)
+    
+    # 3. Pull the full batch from memory in one operation
+    x = data[indices]
+    y = data[indices + 1]
+    
+    # Move to device (CPU) with non_blocking=True to keep the pipeline moving
+    return x.to(device, non_blocking=True), y.to(device, non_blocking=True)

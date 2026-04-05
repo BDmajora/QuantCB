@@ -24,8 +24,7 @@ class MTPModule(nn.Module):
             norm_first=True
         )
         
-        # 3. Targetted Initialization
-        # We only initialize the NEW layers. We leave self.embedding and self.head alone.
+        # 3. Targeted Initialization
         self._init_mtp_weights(self.proj_h)
         self._init_mtp_weights(self.proj_emb)
         self._init_mtp_weights(self.ln_fusion)
@@ -35,7 +34,6 @@ class MTPModule(nn.Module):
         """DeepSeek-style: Initialize MTP specific layers to be very 'quiet' at start."""
         for m in module.modules():
             if isinstance(m, nn.Linear):
-                # Use a very small std to keep initial predictions near-random
                 nn.init.normal_(m.weight, std=0.01)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
@@ -53,17 +51,18 @@ class MTPModule(nn.Module):
         x_embed = self.embedding(targets)
         
         # 2. Mix: DeepSeek-V3 style additive fusion
-        # We use a 0.5 scale to keep the variance stable before LayerNorm
         fused = (self.proj_h(h_base) + self.proj_emb(x_embed)) * 0.5
         x = self.ln_fusion(fused)
         
         # 3. Generate Causal Mask
-        # TransformerEncoderLayer expects a mask of shape (L, L) or (N*H, L, L)
+        # We use the built-in utility to ensure the mask format matches what 
+        # the C++ dispatcher expects for the 'is_causal' hint.
         sz = x.size(1)
-        mask = torch.triu(torch.ones(sz, sz, device=x.device) * float('-inf'), diagonal=1)
+        mask = nn.Transformer.generate_square_subsequent_mask(sz, device=x.device)
         
         # 4. Process through MTP-specific Transformer block
-        # is_causal=True is a hint for flash attention if available
+        # Providing both the 'src_mask' and 'is_causal=True' satisfies the 
+        # validation check and allows for optimized attention kernels.
         x_mtp = self.layer(x, src_mask=mask, is_causal=True)
         
         # 5. Predict t+2 using the shared head

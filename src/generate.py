@@ -1,15 +1,16 @@
-import torch
 import os
+import torch
+from config import *
 from models.quantcb_model import QuantCB_Model
-from models.quantcb_engine import QuantCB_Engine
-from tokenizer_basic import QuantCB_Tokenizer
+from models.ouro_engine import Ouro_Engine 
+from tokenizer import Tokenizer
 
 def load_model_weights(model, checkpoint_path, device, is_fp8=False):
     """Handles loading either standard FP32 or Quantized FP8 weights."""
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Could not find checkpoint at {checkpoint_path}")
 
-    # Use weights_only=True for security/stability unless you have custom classes saved
+    # Use weights_only=True for security/stability
     if is_fp8:
         print(f"\n--- Loading Optimized FP8 Checkpoint: {checkpoint_path} ---")
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
@@ -38,7 +39,8 @@ def load_model_weights(model, checkpoint_path, device, is_fp8=False):
     else:
         print(f"\n--- Loading Base FP32 Checkpoint: {checkpoint_path} ---")
         state_dict = torch.load(checkpoint_path, map_location=device, weights_only=True)
-        # Standard checkpoints might be wrapped in a 'model_state_dict' key
+        
+        # Check for wrapped 'model_state_dict' from trainer saving logic
         if 'model_state_dict' in state_dict:
             model.load_state_dict(state_dict['model_state_dict'], strict=True)
         else:
@@ -48,13 +50,12 @@ def load_model_weights(model, checkpoint_path, device, is_fp8=False):
     return model
 
 def generate():
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = DEVICE # Using the device from your config
     
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.dirname(script_dir) 
-    tok_path = os.path.join(project_root, "modelOutput", "tokenizer.json")
+    # Pathing aligned with your recent trainer updates
+    tok_path = os.path.join(OUTPUT_DIR, "quantcb_tokenizer.json")
 
-    print("Select Model Version:")
+    print("\nSelect Model Version:")
     print("[1] MTP (Standard FP32)")
     print("[2] Optimized (FP8)")
     choice = input("Enter 1 or 2: ").strip()
@@ -63,28 +64,25 @@ def generate():
         filename = "quantcb_fp8.pth"
         is_fp8 = True
     else:
-        filename = "quantcb_final.pth"
+        # Check for the checkpoint name used in your new modular trainer
+        filename = "quantcb_ckpt.pth" if os.path.exists(os.path.join(OUTPUT_DIR, "quantcb_ckpt.pth")) else "quantcb_final.pth"
         is_fp8 = False
 
-    model_path = os.path.join(project_root, "modelOutput", filename)
+    model_path = os.path.join(OUTPUT_DIR, filename)
 
-    tokenizer = QuantCB_Tokenizer()
-    if not os.path.exists(tok_path):
-        print(f"Error: Tokenizer not found at {tok_path}")
+    # Use the new fixed Tokenizer
+    tokenizer = Tokenizer()
+    if not tokenizer.load(tok_path):
+        print(f"Error: Tokenizer not found at {tok_path}. Please run training first.")
         return
-    tokenizer.load(tok_path)
     
-    vocab_size = 2048 # Keeping this consistent with your training script
-    
-    # FIXED: Parameters updated to match the checkpoint's internal shapes
+    # Initializing the model with your specific architectural requirements
     raw_model = QuantCB_Model(
-        vocab_size=vocab_size, 
-        d_model=384,      # Matches checkpoint size mismatch error
-        n_layers=6,       # Matches checkpoint layer count (0 through 5)
-        d_ff=1024,        # Standard for your architecture
-        n_heads=8,        # Standard for your d_model
-        latent_dim=128, 
-        head_dim=64,
+        vocab_size=VOCAB_SIZE, 
+        d_model=384,      
+        n_layers=6,       
+        d_ff=1024,        
+        n_heads=8,        
         num_experts=8,    
         top_k=2           
     ).to(device)
@@ -95,17 +93,30 @@ def generate():
         print(f"Error loading model: {e}")
         return
 
-    engine = QuantCB_Engine(raw_model)
+    # Wrap in the Ouro Engine for the recursive thinking logic
+    engine = Ouro_Engine(
+        raw_model, 
+        max_loops=MAX_LOOPS, 
+        exit_threshold=EXIT_THRESHOLD
+    ).to(device)
 
-    context = torch.zeros((1, 1), dtype=torch.long, device=device) 
+    # Prompting
+    prompt = input("\nEnter prompt (or press Enter for default): ").strip()
+    if not prompt:
+        seed_str = f"{TAGS['truth']}{TAGS['stories']} Once upon a time"
+    else:
+        seed_str = prompt
+
+    context_ids = tokenizer.encode(seed_str)
+    context = torch.tensor([context_ids], dtype=torch.long, device=device)
     
-    print(f"\nGenerating 300 tokens (MLA + MoE + MTP Architecture)...\n" + "="*40)
+    print(f"\nGenerating... (Ouro Logic: {MAX_LOOPS} Loops Max | {EXIT_THRESHOLD} Entropy Exit)\n" + "="*40)
     
     with torch.no_grad():
-        # Using temperature and top_p here is recommended for better quality
-        generated_ids = engine.generate(context, max_new_tokens=300, temperature=0.8)[0].tolist()
+        # Temperature 0.8 provides a good balance of creativity and coherence
+        generated_ids = engine.generate(context, max_new_tokens=300, temperature=0.8)
     
-    output_text = tokenizer.decode(generated_ids)
+    output_text = tokenizer.decode(generated_ids[0].tolist())
     print(output_text)
     print("\n" + "="*40)
 
