@@ -6,7 +6,7 @@ CHECKPOINT_PATH = "modelOutput/checkpoint.pth"
 
 # --- HYPERPARAMETERS ---
 ITERATIONS = 6000      
-BATCH_SIZE = 64        
+BATCH_SIZE = 256        
 BLOCK_SIZE = 256       
 MAX_LR = 3e-4          
 GRAD_CLIP = 1.0        
@@ -22,7 +22,7 @@ NUM_EXPERTS = 8
 TOP_K = 2
 
 # --- PHASE 2: RECURRENCE & ADAPTIVE DEPTH ---
-MAX_LOOPS = 4            # Maximum shared-weight iterations per token
+MAX_LOOPS = 1            # Maximum shared-weight iterations per token
 EXIT_THRESHOLD = 0.5    # Entropy threshold for Q-exit (lower = higher confidence)
 
 # --- DATA & PHASE 1 TAGS ---

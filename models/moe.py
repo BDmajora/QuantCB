@@ -19,10 +19,9 @@ class QuantCB_MoE(nn.Module):
 
     def forward(self, x):
         batch, seq_len, d_model = x.shape
-        x_flat = x.view(-1, d_model) # (Batch * Seq, d_model)
+        x_flat = x.view(-1, d_model)  # (Total_Tokens, d_model)
         
         # 1. Get Router Scores
-        # logits: (Total_Tokens, num_experts)
         router_logits = self.router(x_flat)
         weights = F.softmax(router_logits, dim=-1)
         
@@ -33,20 +32,27 @@ class QuantCB_MoE(nn.Module):
         top_k_weights = top_k_weights / top_k_weights.sum(dim=-1, keepdim=True)
         
         # 3. Dispatch and Aggregate
-        # For simplicity in this implementation, we iterate through tokens.
-        # (In a production 'Flash' version, we would use grouped gemms)
+        # Initialize output tensor
         out = torch.zeros_like(x_flat)
         
         for i in range(self.num_experts):
-            # Find which tokens in the batch were assigned to expert 'i'
+            # Find which tokens (row indices) and which "rank" (0 or 1 in top-k) 
+            # were assigned to expert 'i'
             token_indices, expert_rank = torch.where(top_k_indices == i)
             
             if token_indices.numel() > 0:
-                # Get the tokens assigned to this expert
+                # Dispatch: Get the tokens assigned to this expert
                 expert_input = x_flat[token_indices]
-                # Run the expert
+                
+                # Execute: Run the specific expert
                 expert_out = self.experts[i](expert_input)
-                # Multiply by the router weight and add to output
-                out[token_indices] += expert_out * top_k_weights[token_indices, expert_rank].unsqueeze(-1)
+                
+                # Weighting: Multiply expert output by the specific router weight
+                # We use unsqueeze(-1) to align (Tokens, 1) with (Tokens, d_model)
+                weighted_out = expert_out * top_k_weights[token_indices, expert_rank].unsqueeze(-1)
+                
+                # Safe Aggregation: Use index_add_ to update the output tensor
+                # 0 is the dimension (tokens), token_indices is WHERE, weighted_out is WHAT
+                out.index_add_(0, token_indices, weighted_out)
                 
         return out.view(batch, seq_len, d_model)

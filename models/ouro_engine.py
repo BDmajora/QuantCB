@@ -30,13 +30,16 @@ class Ouro_Engine(nn.Module):
         # Start with base embeddings
         x = self.model.token_embedding(idx)
         
-        # FIX: Move loop_x outside so the model "builds" on its thoughts across loops
+        # Initialization: loop_x builds on its thoughts across loops
         loop_x = x 
         
         presents = [] if past_key_values is None else past_key_values
         logits = None
-        loss = None
         all_probe_logits = [] 
+        
+        # --- FIX: Initialize total_aux_loss OUTSIDE the loop ---
+        # This ensures all expert routing across ALL thinking steps is supervised.
+        total_aux_loss = 0.0
         
         threshold = spec_threshold if spec_threshold is not None else self.exit_threshold
 
@@ -44,7 +47,6 @@ class Ouro_Engine(nn.Module):
         for loop_idx in range(self.max_loops):
             prev_x = loop_x
             new_presents = []
-            total_aux_loss = 0.0
             
             # Learnable gate for weighted residual connection
             gate = torch.sigmoid(self.thinking_gate)
@@ -53,12 +55,15 @@ class Ouro_Engine(nn.Module):
             current_x = loop_x
             for i, block in enumerate(self.model.blocks):
                 layer_past = presents[i] if past_key_values is not None else None
+                
+                # Forward pass through block
                 current_x, present, l_aux = block(current_x, mask=mask, layer_past=layer_past)
                 
                 # Update KV cache only on the final refined step (Memory Optimization)
                 if loop_idx == self.max_loops - 1:
                     new_presents.append(present)
-                    
+                
+                # Accumulate MoE auxiliary loss across all blocks and all loops
                 total_aux_loss += l_aux
             
             # --- WEIGHTED RESIDUAL: The "Thinking" Step ---
@@ -80,32 +85,36 @@ class Ouro_Engine(nn.Module):
                 draft_token = torch.argmax(probs, dim=-1).item()
                 is_hallucinating = hallucination_tags is not None and draft_token in hallucination_tags
                 
-                # Exit early if we are confident AND it's not a hallucination token
+                # Exit early if confident AND it's not a flagged hallucination token
                 if entropy < threshold and not is_hallucinating:
                     break
 
         # --- LOSS CALCULATION (Training) ---
         if targets is not None:
-            # Main Next Token Prediction Loss
+            # 1. Main Next Token Prediction Loss (Cross Entropy)
             loss_main = F.cross_entropy(
                 logits.view(-1, logits.size(-1)), 
                 targets.view(-1)
             )
             
-            # Multi-Token Prediction (MTP) Logic
+            # 2. Multi-Token Prediction (MTP) Logic
+            loss_mtp = 0.0
             if seq_len > 1:
+                # Get hidden states for all but the last token
                 h_n = loop_x_norm[:, :-1, :]
+                # Target is the token at position n+2
                 target_next_plus_one = targets[:, 1:] 
+                
                 logits_mtp, _ = self.model.mtp(h_n, targets[:, :-1])
                 
                 loss_mtp = F.cross_entropy(
                     logits_mtp.reshape(-1, logits_mtp.size(-1)),
                     target_next_plus_one.reshape(-1)
                 )
-                
-                loss = loss_main + (0.1 * loss_mtp) + (0.01 * total_aux_loss)
-            else:
-                loss = loss_main + (0.01 * total_aux_loss)
+            
+            # Final Combined Loss
+            # loss_mtp is weighted at 0.1, MoE aux loss at 0.01
+            loss = loss_main + (0.1 * loss_mtp) + (0.01 * total_aux_loss)
             
             return logits, loss, all_probe_logits
             
@@ -118,6 +127,7 @@ class Ouro_Engine(nn.Module):
         past_key_values = None
         
         for _ in range(max_new_tokens):
+            # If we have a cache, only pass the last token
             idx_cond = idx if past_key_values is None else idx[:, -1:]
                 
             # Forward pass provides next_past_kv as the 3rd return
@@ -128,9 +138,12 @@ class Ouro_Engine(nn.Module):
             )
             past_key_values = next_past_kv
             
+            # Sample from the logits
             logits = logits[:, -1, :] / max(temperature, 1e-5)
             probs = F.softmax(logits, dim=-1)
             idx_next = torch.multinomial(probs, num_samples=1)
+            
+            # Append to the sequence
             idx = torch.cat((idx, idx_next), dim=1)
 
         return idx
