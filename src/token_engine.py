@@ -1,62 +1,73 @@
 import re
-from collections import Counter, defaultdict
+from collections import Counter
 
 class TokenEngine:
     def __init__(self, device="cpu"):
-        # We keep the device param for compatibility, 
-        # but BPE training logic is now algorithmically optimized in CPU/RAM.
-        pass
+        # Mapping offset to stay consistent with your Encoder (Private Use Area)
+        self.offset = 0xE000
 
-    def get_stats(self, vocab):
-        """Finds frequencies of all adjacent pairs."""
-        pairs = Counter()
-        for word, freq in vocab.items():
-            symbols = word.split()
-            for i in range(len(symbols) - 1):
-                pairs[symbols[i], symbols[i+1]] += freq
-        return pairs
-
-    def merge_vocab(self, pair, v_in):
-        """Merges the most frequent pair across the unique word dictionary."""
-        v_out = {}
-        bigram = re.escape(' '.join(pair))
-        p = re.compile(r'(?<!\S)' + bigram + r'(?!\S)')
-        new_token = ''.join(pair)
-        
-        for word in v_in:
-            w_out = p.sub(new_token, word)
-            v_out[w_out] = v_in[word]
-        return v_out
+    def _to_unicode(self, text):
+        """Converts raw bytes to a unicode string in the E000 block."""
+        return "".join(chr(self.offset + b) for b in text.encode("utf-8"))
 
     def train_bpe(self, text, target_vocab_size):
-        # Initial vocabulary: count unique words and space-separate their bytes
-        # We add a special end-of-word token or just work with raw byte strings
+        """
+        Learns BPE merges using optimized C-string replacement.
+        Bypasses the 'space-separated' regex bottleneck.
+        """
+        # 1. Initial Vocab: Map raw words to their Unicode representations
+        # Example: "hello" -> "\uE068\uE065\uE06C\uE06C\uE06F"
         words = re.findall(r'\S+|\s+', text)
         word_freqs = Counter(words)
         
-        # Represent words as space-separated tokens of hex/bytes
-        # e.g., "hello" -> "h e l l o"
-        vocab = {" ".join(list(word)): freq for word, freq in word_freqs.items()}
+        # Dictionary of {unicode_word: frequency}
+        vocab = {self._to_unicode(word): freq for word, freq in word_freqs.items()}
         
-        merges = []
+        merges = {}
+        current_vocab_size = 256 # Starting after the base byte-level tokens
         num_merges = target_vocab_size - 256
 
+        print(f"Starting BPE training for {num_merges} merges...")
+
         for i in range(num_merges):
-            pairs = self.get_stats(vocab)
+            # 2. Count all adjacent pairs in the unicode strings
+            pairs = Counter()
+            for word, freq in vocab.items():
+                for j in range(len(word) - 1):
+                    pair = word[j:j+2]
+                    pairs[pair] += freq
+
             if not pairs:
                 break
             
-            best = max(pairs, key=pairs.get)
-            if pairs[best] < 2:
+            # 3. Find the most frequent pair
+            best_pair_str = max(pairs, key=pairs.get)
+            if pairs[best_pair_str] < 2:
                 break
 
-            vocab = self.merge_vocab(best, vocab)
+            # Convert best_pair back to integer IDs for the merges dict
+            p0 = ord(best_pair_str[0]) - self.offset
+            p1 = ord(best_pair_str[1]) - self.offset
+            new_id = current_vocab_size
+            new_char = chr(self.offset + new_id)
+
+            # Record the merge
+            merges[(p0, p1)] = new_id
             
-            # Convert string representations back to integer IDs for the Tokenizer
-            # This logic assumes the Tokenizer handles the ID mapping
-            merges.append(best)
+            # 4. Perform the merge globally
+            # This is the 'Turbo' part: .replace() on a string is incredibly fast in C
+            new_vocab = {}
+            for word, freq in vocab.items():
+                if best_pair_str in word:
+                    new_vocab[word.replace(best_pair_str, new_char)] = freq
+                else:
+                    new_vocab[word] = freq
+            vocab = new_vocab
+
+            current_vocab_size += 1
             
-            if i % 50 == 0 or i == num_merges - 1:
-                print(f"Merge {i+1}/{num_merges}: {best} | Unique words in dict: {len(vocab)}")
+            if i % 100 == 0 or i == num_merges - 1:
+                print(f"Merge {i+1}/{num_merges}: ({p0}, {p1}) -> {new_id} | "
+                      f"Freq: {pairs[best_pair_str]} | Unique words: {len(vocab)}")
 
         return merges

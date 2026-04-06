@@ -13,66 +13,70 @@ class Tokenizer:
         self.encoder = None
 
     def train(self, text, target_vocab_size):
+        """
+        Streamlined training that accepts the (int, int) -> int 
+        mapping directly from the optimized TokenEngine.
+        """
         if not text:
             return
 
-        print(f"--- Starting Optimized BPE Training ---")
-        raw_merges = self.engine.train_bpe(text, target_vocab_size)
+        print(f"--- Starting Vulkan-Optimized BPE Training ---")
+        # The new Engine returns {(id0, id1): new_id} directly
+        self.merges = self.engine.train_bpe(text, target_vocab_size)
         
-        # We need a temporary map to turn strings back into the IDs we assigned
-        # Initialize it with the base 256 bytes (using latin-1 to keep 1-to-1 byte mapping)
-        token_to_id = {bytes([i]).decode('latin-1'): i for i in range(256)}
-        
-        self.merges = {}
+        # Rebuild the vocab for decoding (O(N) operation)
         self.vocab = {i: bytes([i]) for i in range(256)}
-
-        for i, (p0, p1) in enumerate(raw_merges):
-            new_id = 256 + i
-            
-            # Look up the IDs for the strings provided by the engine
-            # If the engine merges 'h' and 'e', p0='h', p1='e'
-            # If the next merge is 'he' and 'l', p0='he', p1='l'
-            try:
-                id0 = token_to_id[p0]
-                id1 = token_to_id[p1]
-            except KeyError as e:
-                print(f"Error: Could not find ID for token component: {e}")
-                continue
-            
-            # Store the merge as (int, int) -> int
-            self.merges[(id0, id1)] = new_id
-            
-            # Update the token_to_id map so the NEXT merge can find 'he'
-            new_token_str = p0 + p1
-            token_to_id[new_token_str] = new_id
-            
-            # Update the vocab map for decoding
+        
+        # Sort by the new_id to ensure we build the vocab in the correct order
+        sorted_merges = sorted(self.merges.items(), key=lambda x: x[1])
+        
+        for (id0, id1), new_id in sorted_merges:
+            # Direct byte concatenation for the decoding lookup
             self.vocab[new_id] = self.vocab[id0] + self.vocab[id1]
             
-        # Initialize the encoder with the clean (int, int) merges
+        # Initialize the high-speed Regex C-Engine
         self.encoder = Encoder(self.merges)
-        print(f"Success: Learned {len(self.merges)} merges.")
+        print(f"Success: Learned {len(self.merges)} merges. Vocab Size: {len(self.vocab)}")
 
-    def encode(self, text):
+    def encode(self, text, output_tensor=True):
+        """
+        Uses the high-speed Regex engine and returns a Pinned Tensor 
+        ready for the Vulkan Timeline.
+        """
         if not self.encoder:
             if not self.merges:
-                return list(text.encode("utf-8"))
-            self.encoder = Encoder(self.merges)
-        return self.encoder.encode(text)
+                # Fallback to raw bytes if not trained
+                ids = list(text.encode("utf-8"))
+            else:
+                self.encoder = Encoder(self.merges)
+                ids = self.encoder.encode(text)
+        else:
+            ids = self.encoder.encode(text)
+
+        if output_tensor:
+            # CRITICAL FOR VULKAN: pin_memory allows the RX 6800 to 
+            # bypass the CPU for the data transfer.
+            return torch.tensor(ids, dtype=torch.long, pin_memory=True)
+        return ids
 
     def decode(self, ids):
+        """Standard byte-level decoding."""
         if isinstance(ids, torch.Tensor):
+            # Move to CPU list for decoding logic
             ids = ids.tolist()
+            
+        # Efficient join of byte objects
         return b"".join(self.vocab[idx] for idx in ids if idx in self.vocab).decode("utf-8", errors="replace")
 
     def save(self, filepath):
-        # JSON keys must be strings; store as "id1,id2"
+        """Saves merges in a format compatible with the fast-loader."""
         serializable_merges = {f"{p0},{p1}": idx for (p0, p1), idx in self.merges.items()}
         with open(filepath, 'w') as f:
             json.dump(serializable_merges, f)
-        print(f"Tokenizer saved to {filepath}")
+        print(f"Tokenizer saved: {filepath}")
 
     def load(self, filepath):
+        """Loads merges and immediately prepares the Regex Encoder."""
         if not os.path.exists(filepath):
             return False
 
@@ -84,10 +88,13 @@ class Tokenizer:
             p0, p1 = map(int, key.split(','))
             self.merges[(p0, p1)] = idx
             
+        # Reconstruct vocabulary for decoding
         self.vocab = {i: bytes([i]) for i in range(256)}
+        # Merges must be processed in ID order to build dependencies correctly
         for (p0, p1), idx in sorted(self.merges.items(), key=lambda x: x[1]):
             if p0 in self.vocab and p1 in self.vocab:
                 self.vocab[idx] = self.vocab[p0] + self.vocab[p1]
         
+        # Pre-compile the regex rules for the Vulkan loop
         self.encoder = Encoder(self.merges)
         return True

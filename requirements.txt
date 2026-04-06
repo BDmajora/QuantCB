@@ -1,14 +1,17 @@
-# Core Tensor Math & Deep Learning
-torch>=2.0.0
-numpy>=1.24.0
+# --- IREE 2026 Native 3.13 Stack ---
+--extra-index-url https://download.pytorch.org/whl/cpu
 
-# SOTA Tokenization & Model Loading
-transformers>=4.40.0
-tokenizers>=0.19.0
-huggingface_hub>=0.23.0
-datasets>=2.19.0
+# Only the specific 2026 binaries. 
+# These "base" packages ARE the compiler and runtime.
+iree-base-compiler @ https://github.com/iree-org/iree/releases/download/iree-3.12.0rc20260405/iree_base_compiler-3.12.0rc20260405-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+iree-base-runtime @ https://github.com/iree-org/iree/releases/download/iree-3.12.0rc20260405/iree_base_runtime-3.12.0rc20260405-cp312-abi3-manylinux_2_28_x86_64.whl
+iree-turbine @ https://github.com/iree-org/iree-turbine/releases/download/dev-wheels/iree_turbine-3.10.0rc20260405-py3-none-any.whl
+
+# ML Stack
+torch>=2.5.0
+numpy>=2.1.0
+setuptools
 
 # Utilities
 tqdm>=4.66.0
-requests>=2.31.0
-maturin>=1.4.0
+transformers>=4.40.0

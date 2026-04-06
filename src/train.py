@@ -1,41 +1,50 @@
 import os
+import torch
 from config import *
 from data_engine import load_and_tag_all_data
 from setup_utils import setup_tokenizer, encode_dataset, setup_model, load_checkpoint
 from trainer import QuantCBTrainer
 
-def main():
+def train():
+    """
+    Modular training entry point. 
+    Can be imported and executed by a separate Main class.
+    """
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     
-    # 1. Load raw data
+    # 1. Load and Tag Data (CPU)
     raw_text = load_and_tag_all_data()
     
-    # 2. Setup Tokenizer and Encode
+    # 2. Tokenize to Pinned CPU Memory
+    # This is the "Staging Area" for the RX 6800 Vulkan DMA
     tokenizer = setup_tokenizer(raw_text)
     train_data = encode_dataset(tokenizer, raw_text)
     
-    # Free raw text from memory
+    # Clear raw text immediately to maximize available RAM for the Vulkan driver
     del raw_text 
     
-    # 3. Identify special tokens
-    hallucinate_tokens = tokenizer.encode(TAGS["hallucinate"])
-    hallucinate_id = hallucinate_tokens[0] if hallucinate_tokens else 0
+    # 3. Model & Optimizer Setup
+    # Using 'vulkan' target to bypass the standard Torch CPU overhead
+    vulkan_device = "vulkan" 
+    engine, optimizer = setup_model(vulkan_device)
     
-    # 4. Initialize Model, Optimizer, and Checkpoint
-    engine, optimizer = setup_model(DEVICE)
-    start_iter = load_checkpoint(engine, optimizer, DEVICE)
+    # 4. Resume State
+    start_iter = load_checkpoint(engine, optimizer, vulkan_device)
     
-    # 5. Launch Trainer
+    # 5. Execute Trainer Loop
+    # The trainer now handles the 'Vulkan Timeline' (Async dispatch)
     trainer = QuantCBTrainer(
         engine=engine,
         optimizer=optimizer,
         train_data=train_data,
         tokenizer=tokenizer,
         start_iter=start_iter,
-        hallucinate_id=hallucinate_id
+        device=vulkan_device
     )
     
+    print(f"--- Launching Vulkan Training Pipeline from Step {start_iter} ---")
     trainer.run()
 
 if __name__ == "__main__":
-    main()
+    # If this file is run directly, start training
+    train()

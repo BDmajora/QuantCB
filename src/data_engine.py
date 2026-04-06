@@ -5,26 +5,17 @@ import math
 from datasets import load_dataset
 from config import TAGS, CORRUPTION_RATE
 
-# --- NEW: SYNTHETIC REASONING GENERATOR ---
-
+# --- SYNTHETIC REASONING GENERATOR (No changes needed) ---
 def generate_mano_task(num_samples=1000):
-    """
-    Synthetic tree-search task: A -> B, B -> C. Query: A -> ?
-    Forces multi-hop reasoning over loops.
-    """
     samples = []
     entities = ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel"]
     
     for _ in range(num_samples):
-        # Pick three distinct entities for a chain
         a, b, c = random.sample(entities, 3)
-        
-        # Chain of Thought (CoT) construction
         text = f"If {a} goes to {b}, and {b} goes to {c}, then {a} leads to {c}."
         
         tag = TAGS['truth'] if random.random() > CORRUPTION_RATE else TAGS['hallucinate']
         if tag == TAGS['hallucinate']:
-            # Corrupt the logic: A leads to [Wrong Entity]
             wrong_c = random.choice([e for e in entities if e != c])
             text = f"If {a} goes to {b}, and {b} goes to {c}, then {a} leads to {wrong_c}."
             
@@ -32,8 +23,7 @@ def generate_mano_task(num_samples=1000):
         
     return "\n".join(samples)
 
-# --- UPDATED DATA LOADER ---
-
+# --- DATA LOADER (No changes needed - runs entirely on CPU) ---
 def corrupt_logic(text):
     tokens = text.split()
     if len(tokens) < 2:
@@ -46,12 +36,9 @@ def corrupt_logic(text):
 
 def load_and_tag_all_data():
     combined_raw_text = ""
-    
-    # 1. Mano Reasoning Task (Synthetic)
     print("--- Generating Mano Reasoning Task ---")
     combined_raw_text += generate_mano_task(1500) + "\n"
     
-    # 2. TinyStories
     print("--- Loading TinyStories (HF Stream) ---")
     try:
         ds_stories = load_dataset("roneneldan/TinyStories", split="train", streaming=True)
@@ -63,7 +50,6 @@ def load_and_tag_all_data():
     except Exception as e:
         print(f"TinyStories Load Failed: {e}")
 
-    # 3. Wikipedia
     print("--- Loading Wikipedia (HF Stream) ---")
     try:
         ds_wiki = load_dataset("wikimedia/wikipedia", "20231101.en", split="train", streaming=True)
@@ -75,7 +61,6 @@ def load_and_tag_all_data():
     except Exception as e:
         print(f"Wiki Load Failed: {e}")
 
-    # 4. Tiny Shakespeare
     print("--- Loading Tiny Shakespeare ---")
     shk_url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
     try:
@@ -92,43 +77,46 @@ def load_and_tag_all_data():
 
     return combined_raw_text
 
-# --- STRESS TESTING UTILITY ---
-
-def extrapolation_test(engine, tokenizer, test_prompt="If Alpha goes to Bravo, and Bravo goes to Charlie, then Alpha leads to", loops=8):
-    print(f"\n--- EXTRAPOLATION TEST: {loops} LOOPS ---")
-    original_max_loops = engine.max_loops
-    engine.max_loops = loops
+# --- STRESS TESTING UTILITY (Updated for IREE Runtime) ---
+def extrapolation_test(compiled_module, tokenizer, test_prompt="If Alpha goes to Bravo, and Bravo goes to Charlie, then Alpha leads to"):
+    """
+    Updated for IREE Vulkan execution.
+    Note: Dynamic loop alteration is removed because loops are statically compiled.
+    """
+    print(f"\n--- EXTRAPOLATION TEST (Vulkan) ---")
     
-    device = next(engine.parameters()).device
-    input_ids = torch.tensor([tokenizer.encode(test_prompt)], dtype=torch.long, device=device)
+    # 1. Prepare input on CPU as a standard PyTorch tensor or NumPy array
+    input_ids = torch.tensor([tokenizer.encode(test_prompt)], dtype=torch.long)
     
-    with torch.no_grad():
-        output = engine.generate(input_ids, max_new_tokens=5, temperature=0.7)
-        decoded = tokenizer.decode(output[0].tolist())
+    # 2. Convert to NumPy for the IREE runtime
+    input_numpy = input_ids.numpy()
+    
+    # 3. Execute on the RX 6800 via the compiled module
+    # We assume 'generate' is the exported function name in your IREE module
+    output = compiled_module.generate(input_numpy)
+    
+    # 4. Decode the result back on the CPU
+    # Output from IREE is returned as a NumPy array
+    decoded = tokenizer.decode(output[0].tolist())
         
     print(f"Prompt: {test_prompt}")
     print(f"Response: {decoded}")
     
-    engine.max_loops = original_max_loops
     return decoded
 
-def get_batch(data, batch_size, block_size, device):
+def get_batch(data, batch_size, block_size):
     """
     Vectorized indexing: Bypasses Python list comprehensions to achieve
-    C-level memory slicing speeds.
-    """
-    # 1. Generate starting indices for each sequence in the batch
-    ix = torch.randint(len(data) - block_size - 1, (batch_size,))
+    C-level memory slicing speeds. 
     
-    # 2. Create a 2D grid of indices [batch_size, block_size]
-    # ix.unsqueeze(1) is [batch_size, 1]
-    # torch.arange(block_size) is [block_size]
-    # Broadcasting creates the full coordinate map
+    UPDATED: Removed `.to(device)`. IREE expects CPU tensors as input 
+    and handles the device transfer to Vulkan automatically under the hood.
+    """
+    ix = torch.randint(len(data) - block_size - 1, (batch_size,))
     indices = ix.unsqueeze(1) + torch.arange(block_size)
     
-    # 3. Pull the full batch from memory in one operation
     x = data[indices]
     y = data[indices + 1]
     
-    # Move to device (CPU) with non_blocking=True to keep the pipeline moving
-    return x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+    # Return standard CPU tensors. 
+    return x, y

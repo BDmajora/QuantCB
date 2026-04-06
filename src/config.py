@@ -1,10 +1,24 @@
 import torch
+import iree.runtime as ireert
 
-DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+# --- IREE VULKAN RUNTIME SETUP ---
+def initialize_vulkan():
+    # Queries the system for Vulkan devices. 
+    # On your RX 6800, this will hook into the Mesa/RADV or AMDGPU-Pro driver.
+    drivers = ireert.HalDriver.query()
+    if "vulkan" in drivers:
+        # Create a session-persistent config for the RX 6800
+        return ireert.Config("vulkan")
+    return ireert.Config("local-task") # Fallback to CPU-task-system
+
+RUNTIME_CONFIG = initialize_vulkan()
+DEVICE_NAME = "vulkan" if "vulkan" in ireert.HalDriver.query() else "cpu"
+
+# --- CORE HYPERPARAMETERS ---
+# These are used as static constraints during SPIR-V compilation.
 OUTPUT_DIR = "modelOutput"
 CHECKPOINT_PATH = "modelOutput/checkpoint.pth"
 
-# --- HYPERPARAMETERS ---
 ITERATIONS = 6000      
 BATCH_SIZE = 256        
 BLOCK_SIZE = 256       
@@ -21,11 +35,12 @@ N_LAYERS = 6
 NUM_EXPERTS = 8
 TOP_K = 2
 
-# --- PHASE 2: RECURRENCE & ADAPTIVE DEPTH ---
-MAX_LOOPS = 1            # Maximum shared-weight iterations per token
-EXIT_THRESHOLD = 0.5    # Entropy threshold for Q-exit (lower = higher confidence)
+# --- RECURRENCE & ADAPTIVE DEPTH ---
+# These will be baked into the GPU control flow during export.
+MAX_LOOPS = 1            
+EXIT_THRESHOLD = 0.5    
 
-# --- DATA & PHASE 1 TAGS ---
+# --- DATA TAGS ---
 CORRUPTION_RATE = 0.05
 TAGS = {
     "truth": "<|truth|>",
