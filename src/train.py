@@ -25,7 +25,7 @@ def train():
     
     # 3. Model & Optimizer Setup
     # Using 'vulkan' target to bypass the standard Torch CPU overhead
-    vulkan_device = "vulkan" 
+    vulkan_device = "cpu" 
     engine, optimizer = setup_model(vulkan_device)
     
     # 4. Resume State

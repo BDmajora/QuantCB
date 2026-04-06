@@ -25,34 +25,35 @@ class QuantCB_MoE(nn.Module):
         router_logits = self.router(x_flat)
         weights = F.softmax(router_logits, dim=-1)
         
-        # 2. Select Top-K Experts
-        top_k_weights, top_k_indices = torch.topk(weights, self.top_k, dim=-1)
+        # 2. Identify Top-K Experts
+        # We still use topk to find which experts are winners, but we 
+        # won't use these to 'slice' the tensor anymore.
+        _, top_k_indices = torch.topk(weights, self.top_k, dim=-1)
         
-        # Normalize weights so they sum to 1
-        top_k_weights = top_k_weights / top_k_weights.sum(dim=-1, keepdim=True)
+        # 3. Create a Static Weight Mask (The "IREE Fix")
+        # We create a mask of zeros and 'scatter' 1.0s into the top-k positions.
+        # This keeps the shape [Total_Tokens, num_experts] perfectly static.
+        mask = torch.zeros_like(weights)
+        mask.scatter_(1, top_k_indices, 1.0)
         
-        # 3. Dispatch and Aggregate
-        # Initialize output tensor
+        # Apply the mask to our weights and re-normalize.
+        # Now, 'static_weights' is zero for any expert not in the top-k.
+        masked_weights = weights * mask
+        static_weights = masked_weights / (masked_weights.sum(dim=-1, keepdim=True) + 1e-8)
+        
+        # 4. Static Aggregation
+        # Instead of finding indices and slicing, we run the batch through 
+        # the experts and use the weights to "gate" the results.
         out = torch.zeros_like(x_flat)
         
         for i in range(self.num_experts):
-            # Find which tokens (row indices) and which "rank" (0 or 1 in top-k) 
-            # were assigned to expert 'i'
-            token_indices, expert_rank = torch.where(top_k_indices == i)
+            # We process the full x_flat. While this seems redundant, 
+            # IREE/SPIR-V can optimize this much better than dynamic indexing.
+            expert_out = self.experts[i](x_flat)
             
-            if token_indices.numel() > 0:
-                # Dispatch: Get the tokens assigned to this expert
-                expert_input = x_flat[token_indices]
-                
-                # Execute: Run the specific expert
-                expert_out = self.experts[i](expert_input)
-                
-                # Weighting: Multiply expert output by the specific router weight
-                # We use unsqueeze(-1) to align (Tokens, 1) with (Tokens, d_model)
-                weighted_out = expert_out * top_k_weights[token_indices, expert_rank].unsqueeze(-1)
-                
-                # Safe Aggregation: Use index_add_ to update the output tensor
-                # 0 is the dimension (tokens), token_indices is WHERE, weighted_out is WHAT
-                out.index_add_(0, token_indices, weighted_out)
+            # Only tokens assigned to expert 'i' will have a non-zero weight here.
+            # This is essentially a "soft scatter" that the compiler loves.
+            expert_contribution = expert_out * static_weights[:, i].unsqueeze(-1)
+            out = out + expert_contribution
                 
         return out.view(batch, seq_len, d_model)

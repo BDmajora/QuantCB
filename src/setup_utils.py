@@ -33,17 +33,18 @@ def setup_tokenizer(raw_text):
 
 def encode_dataset(tokenizer, raw_text):
     """
-    Encodes text and pins the memory. 
-    Pinned memory is essential for high-speed DMA transfers to your RX 6800.
+    Encodes text into standard CPU tensors. 
+    IREE's runtime efficiently handles the CPU-to-Vulkan data transfer 
+    without the need for PyTorch's CUDA-specific pinned memory.
     """
     print("Encoding full dataset...")
     train_data_list = tokenizer.encode(raw_text)
     
-    # We move to a tensor immediately and use pin_memory=True 
-    # to bypass the CPU-to-Vulkan staging bottleneck.
-    train_data = torch.tensor(train_data_list, dtype=torch.long, pin_memory=True)
+    # Standard tensor creation. Removed pin_memory=True to avoid the 
+    # PyTorch CUDA driver RuntimeError.
+    train_data = torch.tensor(train_data_list, dtype=torch.long)
     
-    print(f"Dataset Size: {len(train_data)} tokens (Pinned to CPU Memory)")
+    print(f"Dataset Size: {len(train_data)} tokens (Standard CPU Memory)")
     return train_data
 
 def setup_model(device_str):

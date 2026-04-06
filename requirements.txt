@@ -15,3 +15,7 @@ setuptools
 # Utilities
 tqdm>=4.66.0
 transformers>=4.40.0
+
+# Data Loading & API
+requests
+datasets

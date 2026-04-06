@@ -40,8 +40,9 @@ class Tokenizer:
 
     def encode(self, text, output_tensor=True):
         """
-        Uses the high-speed Regex engine and returns a Pinned Tensor 
-        ready for the Vulkan Timeline.
+        Uses the high-speed Regex engine and returns a CPU Tensor.
+        We avoid pin_memory=True here because the IREE/Vulkan stack does not 
+        use the CUDA pinned memory allocator.
         """
         if not self.encoder:
             if not self.merges:
@@ -54,9 +55,9 @@ class Tokenizer:
             ids = self.encoder.encode(text)
 
         if output_tensor:
-            # CRITICAL FOR VULKAN: pin_memory allows the RX 6800 to 
-            # bypass the CPU for the data transfer.
-            return torch.tensor(ids, dtype=torch.long, pin_memory=True)
+            # Removed pin_memory=True to prevent RuntimeError on non-CUDA systems.
+            # IREE handles the CPU-to-GPU transfer efficiently on its own.
+            return torch.tensor(ids, dtype=torch.long)
         return ids
 
     def decode(self, ids):

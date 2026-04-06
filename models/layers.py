@@ -50,24 +50,40 @@ class QuantCB_MoE(nn.Module):
         batch, seq_len, d_model = x.shape
         x_flat = x.view(-1, d_model) 
         
+        # 1. Get Router Scores
         router_logits = self.router(x_flat)
         weights = F.softmax(router_logits, dim=-1)
         
+        # 2. Select Top-K Experts
         top_k_weights, top_k_indices = torch.topk(weights, self.top_k, dim=-1)
-        top_k_weights = top_k_weights / (top_k_weights.sum(dim=-1, keepdim=True) + 1e-6)
         
-        # Load balancing loss
-        mean_probs = weights.mean(dim=0)
+        # 3. Create Static Weight Mask (The "IREE Fix")
+        # Instead of finding indices, we create a full-size weight matrix 
+        # where only the chosen experts have non-zero values.
         expert_mask = F.one_hot(top_k_indices, num_classes=self.num_experts).float()
-        density_probs = expert_mask.mean(dim=(0, 1))
+        
+        # Broadcast weights across the mask: (Tokens, Top_K, 1) * (Tokens, Top_K, Experts)
+        # Then sum across the top_k dimension to get (Tokens, Experts)
+        static_weights = (top_k_weights.unsqueeze(-1) * expert_mask).sum(dim=1)
+        
+        # Final normalization to ensure total weight per token = 1.0
+        static_weights = static_weights / (static_weights.sum(dim=-1, keepdim=True) + 1e-6)
+        
+        # 4. Load balancing loss (calculated using the static mask)
+        mean_probs = weights.mean(dim=0)
+        density_probs = static_weights.mean(dim=0)
         l_aux = self.num_experts * torch.sum(mean_probs * density_probs)
         
+        # 5. Static Aggregation Loop
+        # We process the batch through each expert. The weight mask ensures that 
+        # an expert only contributes to the tokens it was actually assigned to.
         final_output = torch.zeros_like(x_flat)
         for i, expert in enumerate(self.experts):
-            token_idx, top_k_idx = torch.where(top_k_indices == i)
-            if token_idx.numel() > 0:
-                expert_out = expert(x_flat[token_idx])
-                final_output[token_idx] += expert_out * top_k_weights[token_idx, top_k_idx].unsqueeze(-1)
+            expert_out = expert(x_flat)
+            # Apply the weight for this specific expert across all tokens
+            # For tokens not assigned to this expert, weight_i is 0.0
+            weight_i = static_weights[:, i].unsqueeze(-1)
+            final_output = final_output + (expert_out * weight_i)
                 
         return final_output.view(batch, seq_len, d_model), l_aux
 
@@ -84,7 +100,7 @@ class QuantCB_Block(nn.Module):
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None, 
                 layer_past: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
         
-        # 1. Attention Path (RoPE is applied inside self.attn)
+        # 1. Attention Path
         residual = x
         attn_out, present = self.attn(self.ln_1(x), mask=mask, layer_past=layer_past)
         x = residual + attn_out

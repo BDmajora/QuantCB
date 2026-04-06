@@ -51,6 +51,41 @@ class QuantCB_Model(nn.Module):
         self.latent_probe = nn.Linear(d_model, 1, bias=False)
         nn.init.normal_(self.latent_probe.weight, std=0.02)
 
+    def forward(self, x, mask=None, layer_past=None):
+        """
+        The main execution path for the model.
+        x shape: (batch_size, seq_length)
+        mask: Optional attention mask
+        layer_past: Optional list of KV caches from previous steps
+        
+        returns: Tuple(logits, all_presents, total_aux_loss)
+        """
+        # 1. Convert token IDs to embeddings
+        h = self.token_embedding(x)
+        
+        all_presents = []
+        total_aux_loss = torch.tensor(0.0, device=x.device)
+        
+        # 2. Pass through all transformer blocks (MoE/Attention)
+        for i, block in enumerate(self.blocks):
+            # Extract this specific layer's past KV cache if it exists
+            block_past = layer_past[i] if layer_past is not None else None
+            
+            # Unpack the 3 things QuantCB_Block returns
+            h, present, l_aux = block(h, mask=mask, layer_past=block_past)
+            
+            total_aux_loss = total_aux_loss + l_aux
+            all_presents.append(present)
+            
+        # 3. Apply final RMSNorm
+        h = self.ln_f(h)
+        
+        # 4. Project latent state to vocabulary logits
+        logits = self.lm_head(h)
+        
+        # Return everything so training and inference are properly supported!
+        return logits, all_presents, total_aux_loss
+
     def get_hallucination_score(self, h_n):
         """
         Inspects the latent state to detect logic drift.
