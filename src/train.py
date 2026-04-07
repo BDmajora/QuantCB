@@ -1,50 +1,48 @@
 import os
-import torch
+import iree.runtime as ireert
+from pathlib import Path
 from config import *
 from data_engine import load_and_tag_all_data
-from setup_utils import setup_tokenizer, encode_dataset, setup_model, load_checkpoint
-from trainer import QuantCBTrainer
+from setup_utils import setup_tokenizer, encode_dataset
+from trainer_vulkan import IREEVulkanTrainer
 
 def train():
     """
-    Modular training entry point. 
-    Can be imported and executed by a separate Main class.
+    Pure Vulkan Training Entry Point.
+    Decoupled from PyTorch runtime; executes SPIR-V kernels directly.
     """
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     
-    # 1. Load and Tag Data (CPU)
+    # 1. Prepare Data (CPU)
+    print("--- 2026 QuantCB: Data Preparation ---")
     raw_text = load_and_tag_all_data()
-    
-    # 2. Tokenize to Pinned CPU Memory
-    # This is the "Staging Area" for the RX 6800 Vulkan DMA
     tokenizer = setup_tokenizer(raw_text)
     train_data = encode_dataset(tokenizer, raw_text)
+    del raw_text # Minimize CPU RAM usage
     
-    # Clear raw text immediately to maximize available RAM for the Vulkan driver
-    del raw_text 
+    # 2. Initialize Vulkan Device
+    # This reaches out to the RX 6800 via the Vulkan SDK
+    config = ireert.Config("vulkan")
     
-    # 3. Model & Optimizer Setup
-    # Using 'vulkan' target to bypass the standard Torch CPU overhead
-    vulkan_device = "cpu" 
-    engine, optimizer = setup_model(vulkan_device)
+    # 3. Locate the Training Binary
+    # This file must contain the baked training logic
+    vmfb_path = Path(OUTPUT_DIR) / "quantcb_vulkan_train.vmfb"
     
-    # 4. Resume State
-    start_iter = load_checkpoint(engine, optimizer, vulkan_device)
-    
-    # 5. Execute Trainer Loop
-    # The trainer now handles the 'Vulkan Timeline' (Async dispatch)
-    trainer = QuantCBTrainer(
-        engine=engine,
-        optimizer=optimizer,
+    if not vmfb_path.exists():
+        print(f"ERROR: {vmfb_path} not found. Ensure you compiled the training module.")
+        return
+
+    # 4. Launch the Native Trainer
+    trainer = IREEVulkanTrainer(
+        config=config,
+        vmfb_path=vmfb_path,
         train_data=train_data,
         tokenizer=tokenizer,
-        start_iter=start_iter,
-        device=vulkan_device
+        start_iter=0
     )
     
-    print(f"--- Launching Vulkan Training Pipeline from Step {start_iter} ---")
+    print(f"--- Starting Native SPIR-V Training Pipeline ---")
     trainer.run()
 
 if __name__ == "__main__":
-    # If this file is run directly, start training
     train()

@@ -58,30 +58,22 @@ class QuantCB_MoE(nn.Module):
         top_k_weights, top_k_indices = torch.topk(weights, self.top_k, dim=-1)
         
         # 3. Create Static Weight Mask (The "IREE Fix")
-        # Instead of finding indices, we create a full-size weight matrix 
-        # where only the chosen experts have non-zero values.
         expert_mask = F.one_hot(top_k_indices, num_classes=self.num_experts).float()
         
-        # Broadcast weights across the mask: (Tokens, Top_K, 1) * (Tokens, Top_K, Experts)
-        # Then sum across the top_k dimension to get (Tokens, Experts)
         static_weights = (top_k_weights.unsqueeze(-1) * expert_mask).sum(dim=1)
-        
-        # Final normalization to ensure total weight per token = 1.0
         static_weights = static_weights / (static_weights.sum(dim=-1, keepdim=True) + 1e-6)
         
-        # 4. Load balancing loss (calculated using the static mask)
+        # 4. Load balancing loss
         mean_probs = weights.mean(dim=0)
         density_probs = static_weights.mean(dim=0)
         l_aux = self.num_experts * torch.sum(mean_probs * density_probs)
         
         # 5. Static Aggregation Loop
-        # We process the batch through each expert. The weight mask ensures that 
-        # an expert only contributes to the tokens it was actually assigned to.
-        final_output = torch.zeros_like(x_flat)
+        # Explicit device and dtype binding is required to stop lifts
+        final_output = torch.zeros_like(x_flat, device=x_flat.device, dtype=x_flat.dtype)
+        
         for i, expert in enumerate(self.experts):
             expert_out = expert(x_flat)
-            # Apply the weight for this specific expert across all tokens
-            # For tokens not assigned to this expert, weight_i is 0.0
             weight_i = static_weights[:, i].unsqueeze(-1)
             final_output = final_output + (expert_out * weight_i)
                 

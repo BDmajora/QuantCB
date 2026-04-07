@@ -7,8 +7,8 @@ class DynamicNTKRotaryEmbedding(nn.Module):
         self.dim = dim
         self.max_position_embeddings = max_position_embeddings
         self.base = base
-        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float().to(device) / dim))
-        self.register_buffer("inv_freq", inv_freq)
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32, device=device) / dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
         self._set_cos_sin_cache(max_position_embeddings, device)
 
     def _set_cos_sin_cache(self, seq_len, device):
@@ -20,12 +20,17 @@ class DynamicNTKRotaryEmbedding(nn.Module):
         self.register_buffer("sin_cached", emb.sin()[None, None, :, :], persistent=False)
 
     def forward(self, x, seq_len):
+        # IREE Fix: Do not mutate module state (register_buffer) during forward trace
         if seq_len > self.max_seq_len_cached:
-            # Dynamic NTK scaling
             base = self.base * ((seq_len / self.max_position_embeddings) - 0.5) ** (self.dim / (self.dim - 2))
-            inv_freq = 1.0 / (base ** (torch.arange(0, self.dim, 2).float().to(x.device) / self.dim))
-            self.register_buffer("inv_freq", inv_freq)
-            self._set_cos_sin_cache(seq_len, x.device)
+            inv_freq = 1.0 / (base ** (torch.arange(0, self.dim, 2, dtype=torch.float32, device=x.device) / self.dim))
+            t = torch.arange(seq_len, device=x.device, dtype=inv_freq.dtype)
+            freqs = torch.outer(t, inv_freq)
+            emb = torch.cat((freqs, freqs), dim=-1)
+            cos = emb.cos()[None, None, :, :]
+            sin = emb.sin()[None, None, :, :]
+            return cos[:, :, :seq_len, ...], sin[:, :, :seq_len, ...]
+            
         return self.cos_cached[:, :, :seq_len, ...], self.sin_cached[:, :, :seq_len, ...]
 
 def apply_rotary_pos_emb(q, k, cos, sin):
