@@ -1,149 +1,122 @@
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-import math
-from typing import Optional, Tuple, List
+# 1. FIX: Proper imports and alias to match your usage
+from block import quantcb_block_forward_stateless as block_forward_stateless
+from mtp_verify import mtp_forward_stateless # Ensure this file exists and is named correctly
 
-class Ouro_Engine(nn.Module):
-    def __init__(self, model, max_loops=4, exit_threshold=0.5):
-        super().__init__()
-        self.model = model
-        self.max_loops = max_loops
-        self.exit_threshold = exit_threshold
-        
-        # Phase 2: Latent Probe for "Clean vs Corrupted" supervision
-        self.latent_probe = nn.Linear(model.token_embedding.embedding_dim, 1)
-        
-        # Phase 2: Weighted Residual Connection ("Thinking Gate")
-        # Starts at 0.0, which means torch.sigmoid(0.0) = 0.5 (equal mix)
-        self.thinking_gate = nn.Parameter(torch.tensor([0.0]))
+def ouro_engine_forward_stateless(
+    idx: torch.Tensor,
+    weights: dict,            
+    num_blocks: int,          
+    max_loops: int = 4,       
+    targets: torch.Tensor = None,
+    mask: torch.Tensor = None,
+    past_key_values: list = None,
+    spec_threshold: float = 0.5,
+    hallucination_tags: list = None,
+    is_tracing: bool = False  
+):
+    batch, seq_len = idx.shape
+    device = idx.device
+    
+    if mask is None and seq_len > 1 and past_key_values is None:
+        mask = torch.tril(torch.ones(seq_len, seq_len, device=device)) == 1
+        mask = mask.view(1, 1, seq_len, seq_len)
 
-    def forward(self, idx, targets=None, mask=None, past_key_values=None, spec_threshold=None, hallucination_tags=None):
-        batch, seq_len = idx.shape
-        device = idx.device
+    x = F.embedding(idx, weights['token_embedding.weight'])
+    loop_x = x 
+    
+    presents = [] if past_key_values is None else past_key_values
+    logits = None
+    all_probe_logits = [] 
+    total_aux_loss = 0.0
+    
+    for loop_idx in range(max_loops):
+        prev_x = loop_x
+        new_presents = []
+        gate = torch.sigmoid(weights['thinking_gate'])
+        current_x = loop_x
         
-        # Ensure mask is boolean for MLA/Attention logic
-        if mask is None and seq_len > 1 and past_key_values is None:
-            mask = torch.tril(torch.ones(seq_len, seq_len, device=device)) == 1
-            mask = mask.view(1, 1, seq_len, seq_len)
-
-        # Start with base embeddings
-        x = self.model.token_embedding(idx)
-        
-        # Initialization: loop_x builds on its thoughts across loops
-        loop_x = x 
-        
-        presents = [] if past_key_values is None else past_key_values
-        logits = None
-        all_probe_logits = [] 
-        
-        # --- FIX: Initialize total_aux_loss OUTSIDE the loop ---
-        # This ensures all expert routing across ALL thinking steps is supervised.
-        total_aux_loss = 0.0
-        
-        threshold = spec_threshold if spec_threshold is not None else self.exit_threshold
-
-        # --- Phase 2: Shared-Weight Recursion Loop ---
-        for loop_idx in range(self.max_loops):
-            prev_x = loop_x
-            new_presents = []
+        for i in range(num_blocks):
+            layer_past = presents[i] if past_key_values is not None else None
             
-            # Learnable gate for weighted residual connection
-            gate = torch.sigmoid(self.thinking_gate)
+            # 2. FIX: Extract weights according to quantcb_block_forward_stateless signature
+            # We need: ln_1_weight, ln_2_weight, attn_weights (dict), moe_weights (dict)
             
-            # Process through the Transformer Blocks (with MLA + RoPE)
-            current_x = loop_x
-            for i, block in enumerate(self.model.blocks):
-                layer_past = presents[i] if past_key_values is not None else None
-                
-                # Forward pass through block
-                current_x, present, l_aux = block(current_x, mask=mask, layer_past=layer_past)
-                
-                # Update KV cache only on the final refined step (Memory Optimization)
-                if loop_idx == self.max_loops - 1:
-                    new_presents.append(present)
-                
-                # Accumulate MoE auxiliary loss across all blocks and all loops
-                total_aux_loss += l_aux
+            ln1 = weights[f'blocks.{i}.ln1.weight']
+            ln2 = weights[f'blocks.{i}.ln2.weight']
             
-            # --- WEIGHTED RESIDUAL: The "Thinking" Step ---
-            # loop_x evolves by mixing the previous thought with the new calculation
-            loop_x = (1 - gate) * prev_x + gate * current_x
-                
-            loop_x_norm = self.model.ln_f(loop_x)
-            logits = self.model.lm_head(loop_x_norm)
+            attn_w = {k.split(f'blocks.{i}.attn.')[-1]: v 
+                      for k, v in weights.items() if f'blocks.{i}.attn.' in k}
             
-            # Calculate and store probe logits for supervision
-            probe_step = self.latent_probe(loop_x_norm)
-            all_probe_logits.append(probe_step)
+            moe_w = {k.split(f'blocks.{i}.moe.')[-1]: v 
+                     for k, v in weights.items() if f'blocks.{i}.moe.' in k}
             
-            # --- Entropy Exit Gate (Inference only) ---
-            if targets is None and seq_len == 1:
-                probs = F.softmax(logits[:, -1, :], dim=-1)
-                entropy = -(probs * torch.log(probs + 1e-9)).sum(dim=-1).mean()
-                
-                draft_token = torch.argmax(probs, dim=-1).item()
-                is_hallucinating = hallucination_tags is not None and draft_token in hallucination_tags
-                
-                # Exit early if confident AND it's not a flagged hallucination token
-                if entropy < threshold and not is_hallucinating:
-                    break
-
-        # --- LOSS CALCULATION (Training) ---
-        if targets is not None:
-            # 1. Main Next Token Prediction Loss (Cross Entropy)
-            loss_main = F.cross_entropy(
-                logits.view(-1, logits.size(-1)), 
-                targets.view(-1)
+            # Forward pass through functionalized block
+            current_x, present, l_aux = block_forward_stateless(
+                current_x, 
+                mask=mask, 
+                layer_past=layer_past, 
+                ln_1_weight=ln1,
+                ln_2_weight=ln2,
+                attn_weights=attn_w,
+                moe_weights=moe_w
+                # If you have specific n_heads/latent_dim, pass them here or let defaults handle it
             )
             
-            # 2. Multi-Token Prediction (MTP) Logic
-            loss_mtp = 0.0
-            if seq_len > 1:
-                # Get hidden states for all but the last token
-                h_n = loop_x_norm[:, :-1, :]
-                # Target is the token at position n+2
-                target_next_plus_one = targets[:, 1:] 
-                
-                logits_mtp, _ = self.model.mtp(h_n, targets[:, :-1])
-                
-                loss_mtp = F.cross_entropy(
-                    logits_mtp.reshape(-1, logits_mtp.size(-1)),
-                    target_next_plus_one.reshape(-1)
-                )
+            if loop_idx == max_loops - 1:
+                new_presents.append(present)
             
-            # Final Combined Loss
-            # loss_mtp is weighted at 0.1, MoE aux loss at 0.01
-            loss = loss_main + (0.1 * loss_mtp) + (0.01 * total_aux_loss)
-            
-            return logits, loss, all_probe_logits
-            
-        # Return results and updated KV cache for generation
-        return logits, None, new_presents
-
-    @torch.no_grad()
-    def generate(self, idx, max_new_tokens, temperature=1.0, **kwargs):
-        self.model.eval()
-        past_key_values = None
+            total_aux_loss += l_aux
         
-        for _ in range(max_new_tokens):
-            # If we have a cache, only pass the last token
-            idx_cond = idx if past_key_values is None else idx[:, -1:]
-                
-            # Forward pass provides next_past_kv as the 3rd return
-            logits, _, next_past_kv = self.forward(
-                idx_cond, 
-                past_key_values=past_key_values,
-                **kwargs
-            )
-            past_key_values = next_past_kv
+        loop_x = (1 - gate) * prev_x + gate * current_x
             
-            # Sample from the logits
-            logits = logits[:, -1, :] / max(temperature, 1e-5)
-            probs = F.softmax(logits, dim=-1)
-            idx_next = torch.multinomial(probs, num_samples=1)
+        loop_x_norm = F.layer_norm(
+            loop_x, 
+            [weights['ln_f.weight'].shape[0]], 
+            weights['ln_f.weight'], 
+            weights.get('ln_f.bias')
+        )
+        
+        logits = F.linear(loop_x_norm, weights['lm_head.weight'], weights.get('lm_head.bias'))
+        probe_step = F.linear(loop_x_norm, weights['latent_probe.weight'], weights.get('latent_probe.bias'))
+        all_probe_logits.append(probe_step)
+        
+        if targets is None and seq_len == 1 and not is_tracing:
+            probs = F.softmax(logits[:, -1, :], dim=-1)
+            entropy = -(probs * torch.log(probs + 1e-9)).sum(dim=-1).mean()
             
-            # Append to the sequence
-            idx = torch.cat((idx, idx_next), dim=1)
+            draft_token = torch.argmax(probs, dim=-1).item()
+            is_hallucinating = hallucination_tags is not None and draft_token in hallucination_tags
+            
+            if entropy < spec_threshold and not is_hallucinating:
+                break
 
-        return idx
+    if targets is not None:
+        loss_main = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+        
+        loss_mtp = 0.0
+        if seq_len > 1:
+            h_n = loop_x_norm[:, :-1, :]
+            target_next_plus_one = targets[:, 1:] 
+            
+            # 3. FIX: Extract MTP weights specifically
+            mtp_w = {k.split('mtp.')[-1]: v for k, v in weights.items() if k.startswith('mtp.')}
+            
+            # Call using the shared weights logic
+            logits_mtp, _ = mtp_forward_stateless(
+                h_base=h_n, 
+                targets=targets[:, :-1], 
+                **mtp_w,
+                n_heads=8 # Adjust n_heads as per your config
+            )
+            
+            loss_mtp = F.cross_entropy(
+                logits_mtp.reshape(-1, logits_mtp.size(-1)),
+                target_next_plus_one.reshape(-1)
+            )
+        
+        loss = loss_main + (0.1 * loss_mtp) + (0.01 * total_aux_loss)
+        return logits, loss, all_probe_logits
+        
+    return logits, None, new_presents

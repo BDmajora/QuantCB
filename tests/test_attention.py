@@ -1,6 +1,6 @@
 import torch
 # No more relative path mess—import directly from the root-level models folder
-from models.attention import MLA_Attention 
+from models.mla_original import MLA_Attention 
 
 def test_mla_logic():
     print("--- Running MLA Attention Test from /tests/ ---")

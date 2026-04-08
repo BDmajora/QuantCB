@@ -1,5 +1,5 @@
 import torch
-from models.attention import MLA_Attention 
+from models.mla_original import MLA_Attention 
 
 def test_causal_integrity():
     # Configuration matching the new MLA architecture
