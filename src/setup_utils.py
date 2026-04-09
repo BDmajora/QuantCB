@@ -1,21 +1,15 @@
 import os
 import torch
 import numpy as np
+# 2026 Standard: IREE Runtime handles the execution of the compiled binary
+import iree.runtime as ireert 
 from config import *
 from lr_scheduler import get_lr
-from models.quantcb_model import QuantCB_Model
-from models.ouro_engine import Ouro_Engine 
 from tokenizer import Tokenizer
 
-# --- CORE PINNING & MEMORY OPTIMIZATION ---
-# Since DEVICE is gone, we optimize CPU threading globally. 
-# This prevents the Python/MKL backend from fighting for logical cores 
-# while the Vulkan kernels are being dispatched.
+# CPU is now ONLY used for data orchestration and Tokenization.
 physical_cores = max(1, os.cpu_count() // 2)
 torch.set_num_threads(physical_cores)
-
-# Boost precision for CPU-side weight prep and optimizer math
-torch.set_float32_matmul_precision('high')
 
 TOKENIZER_PATH = os.path.join(OUTPUT_DIR, "quantcb_tokenizer.json")
 
@@ -33,59 +27,50 @@ def setup_tokenizer(raw_text):
 
 def encode_dataset(tokenizer, raw_text):
     """
-    Encodes text into standard CPU tensors. 
-    IREE's runtime efficiently handles the CPU-to-Vulkan data transfer 
-    without the need for PyTorch's CUDA-specific pinned memory.
+    Encodes text into standard NumPy arrays.
+    IREE's Vulkan runtime prefers NumPy buffers for zero-copy memory mapping
+    rather than PyTorch pinned tensors.
     """
     print("Encoding full dataset...")
     train_data_list = tokenizer.encode(raw_text)
-    
-    # Standard tensor creation. Removed pin_memory=True to avoid the 
-    # PyTorch CUDA driver RuntimeError.
-    train_data = torch.tensor(train_data_list, dtype=torch.long)
-    
-    print(f"Dataset Size: {len(train_data)} tokens (Standard CPU Memory)")
+    train_data = np.array(train_data_list, dtype=np.int32)
+    print(f"Dataset Size: {len(train_data)} tokens (Host RAM)")
     return train_data
 
-def setup_model(device_str):
+def setup_iree_runtime():
     """
-    Initializes the model and engine.
-    device_str: Pass your 'vulkan' or 'cuda' or 'cpu' target here.
+    Loads the AOT-compiled Vulkan module.
+    No PyTorch eager models are initialized here.
     """
-    raw_model = QuantCB_Model(
-        vocab_size=VOCAB_SIZE, d_model=D_MODEL, n_layers=N_LAYERS, 
-        num_experts=NUM_EXPERTS, top_k=TOP_K
-    )
-    
-    engine = Ouro_Engine(
-        raw_model, 
-        max_loops=MAX_LOOPS, 
-        exit_threshold=EXIT_THRESHOLD
-    ).to(device_str)
+    vmfb_path = os.path.join(OUTPUT_DIR, "quantcb_vulkan.vmfb")
+    if not os.path.exists(vmfb_path):
+        raise FileNotFoundError(f"Missing compiled binary: {vmfb_path}. Run compile_for_vulkan.py first.")
 
-    print(f"Engine initialized in Eager Mode (CPU Threads: {torch.get_num_threads()})")
+    print(f"Loading IREE VM FlatBuffer from {vmfb_path}...")
     
-    optimizer = torch.optim.AdamW(
-        engine.parameters(), 
-        lr=MAX_LR, 
-        weight_decay=WEIGHT_DECAY
-    )
-    return engine, optimizer
+    # Initialize the Vulkan HAL (Hardware Abstraction Layer)
+    config = ireert.Config("vulkan")
+    
+    # Memory-map the binary directly via the VmModule class for instant load times
+    vm_module = ireert.VmModule.mmap(config.vm_instance, vmfb_path)
+    
+    # Bind the module to the Vulkan context
+    ctx = ireert.SystemContext(config=config)
+    ctx.add_vm_module(vm_module)
+    
+    # 'module' is the compiled PyTorch graph
+    engine = ctx.modules.module 
+    
+    print("--- IREE Vulkan Runtime Active ---")
+    return engine, config
 
-def load_checkpoint(engine, optimizer, device_str):
-    """Loads model state and returns the next iteration count."""
+def load_checkpoint(start_iter=0):
+    """
+    In the AOT paradigm, state dicts are managed directly by the IREE module 
+    or loaded via side-channels. For simplicity, we track iteration count.
+    """
     if os.path.exists(CHECKPOINT_PATH):
-        print(f"Resuming from checkpoint: {CHECKPOINT_PATH}")
-        # weights_only=True is faster and safer for state_dict loads
-        ckpt = torch.load(CHECKPOINT_PATH, map_location=device_str, weights_only=True)
-        engine.load_state_dict(ckpt['model_state_dict'])
-        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-        return ckpt['iteration'] + 1
-    return 0
-
-def update_lr(optimizer, step, start_iter):
-    """Updates the optimizer's LR based on the Cosine/Warmup scheduler."""
-    current_lr = get_lr(step, start_iter)
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = current_lr
-    return current_lr
+        print(f"Resuming metadata from: {CHECKPOINT_PATH}")
+        ckpt = torch.load(CHECKPOINT_PATH, weights_only=True)
+        return ckpt.get('iteration', 0) + 1
+    return start_iter

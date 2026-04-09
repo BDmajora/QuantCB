@@ -1,34 +1,20 @@
-import torch
-import iree.runtime as ireert
+import os
 
-# --- IREE VULKAN RUNTIME SETUP ---
-def initialize_vulkan():
-    """
-    Queries the system for Vulkan devices. 
-    On your RX 6800, this will hook into the Mesa/RADV or AMDGPU-Pro driver.
-    """
-    drivers = ireert.HalDriver.query()
-    # Check if 'vulkan' is in the list of available drivers
-    if any("vulkan" in d for d in drivers):
-        # Create a session-persistent config for the RX 6800
-        return ireert.Config("vulkan")
-    print("Vulkan driver not found. Falling back to CPU-task-system.")
-    return ireert.Config("local-task") 
-
-RUNTIME_CONFIG = initialize_vulkan()
-# Helper for logging/debugging
-DEVICE_NAME = "vulkan" if "vulkan" in str(ireert.HalDriver.query()) else "cpu"
+# --- IREE RUNTIME SETTINGS ---
+IREE_DRIVER = "vulkan" 
+DEVICE_NAME = "AMD Radeon RX 6800 (Vulkan)"
 
 # --- FILE PATHS ---
 OUTPUT_DIR = "modelOutput"
-CHECKPOINT_PATH = "modelOutput/checkpoint.pth"
+CHECKPOINT_PATH = os.path.join(OUTPUT_DIR, "checkpoint.pth")
+
+if not os.path.exists(OUTPUT_DIR):
+    os.makedirs(OUTPUT_DIR)
 
 # --- CORE HYPERPARAMETERS ---
-# These are used as static constraints during SPIR-V compilation.
 ITERATIONS = 6000      
 BATCH_SIZE = 256        
 BLOCK_SIZE = 256       
-# Define SEQ_LENGTH for the compiler to avoid 'UndefinedVariable' errors
 SEQ_LENGTH = BLOCK_SIZE 
 
 MAX_LR = 3e-4          
@@ -44,8 +30,12 @@ N_LAYERS = 6
 NUM_EXPERTS = 8
 TOP_K = 2
 
+# --- MLA / ATTENTION DIMENSIONS (NEW) ---
+N_HEADS = 6             # 384 // 6 = 64 head_dim
+HEAD_DIM = 64           
+LATENT_DIM = 512        # Compressed KV latent dimension
+
 # --- RECURRENCE & ADAPTIVE DEPTH ---
-# These are baked into the GPU control flow during IREE export.
 MAX_LOOPS = 1            
 EXIT_THRESHOLD = 0.5    
 

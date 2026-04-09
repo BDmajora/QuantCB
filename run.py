@@ -6,7 +6,6 @@ import shutil
 def cleanup_project():
     """Clears out the modelOutput folder to prepare for a fresh run."""
     project_root = os.getcwd()
-    # Ensure this matches the OUTPUT_DIR in your config
     output_dir = os.path.join(project_root, "modelOutput")
     
     if not os.path.exists(output_dir):
@@ -17,11 +16,8 @@ def cleanup_project():
     confirm = input("Are you sure? (y/n): ").strip().lower()
     
     if confirm == 'y':
-        files = os.listdir(output_dir)
-        for f in files:
-            if f == ".gitignore":
-                continue
-            
+        for f in os.listdir(output_dir):
+            if f == ".gitignore": continue
             path = os.path.join(output_dir, f)
             try:
                 if os.path.isfile(path) or os.path.islink(path):
@@ -36,15 +32,16 @@ def cleanup_project():
         print("Cleanup cancelled.")
 
 def run_engine_auto():
-    src_dir = "src"
+    # Use absolute path for the project root
+    root_dir = os.path.abspath(os.getcwd())
+    src_dir = os.path.join(root_dir, "src")
+    models_dir = os.path.join(root_dir, "models")
     
     if not os.path.exists(src_dir):
         print(f"Error: {src_dir} directory not found.")
         return
 
-    # Automatically find all operational scripts in src/
     scripts = sorted([f for f in os.listdir(src_dir) if f.endswith(".py") and not f.startswith("__")])
-    
     cleanup_index = len(scripts)
 
     print("\n--- QuantCB Source Runner ---")
@@ -54,37 +51,29 @@ def run_engine_auto():
 
     try:
         user_input = input("\nSelect a script to run (or 'q' to quit): ").strip()
-        if user_input.lower() == 'q':
-            return
+        if user_input.lower() == 'q': return
         
         choice = int(user_input)
         
         if 0 <= choice < len(scripts):
             selected_file = scripts[choice]
+            script_path = os.path.join(src_dir, selected_file)
             
-            # --- FIX: Setup Environment for Real-Time Output ---
+            # --- CRITICAL ENVIRONMENT FIX ---
             env = os.environ.copy()
-            
-            # This flag prevents Python from buffering stdout. 
-            # Without this, you won't see logs until the buffer fills up.
             env["PYTHONUNBUFFERED"] = "1" 
             
-            root_dir = os.getcwd()
-            # Construct PYTHONPATH so local imports work correctly
-            env["PYTHONPATH"] = (
-                root_dir + os.pathsep + 
-                os.path.join(root_dir, src_dir) + os.pathsep + 
-                env.get("PYTHONPATH", "")
-            )
+            # Added models_dir to the PYTHONPATH to resolve the "block" import
+            current_pythonpath = env.get("PYTHONPATH", "")
+            env["PYTHONPATH"] = os.pathsep.join([root_dir, src_dir, models_dir, current_pythonpath]).strip(os.pathsep)
 
-            print(f"\n>> Executing src/{selected_file}...")
+            print(f"\n>> Executing: {selected_file}...")
             
-            # subprocess.run blocks execution until the child script finishes
-            subprocess.run([sys.executable, os.path.join(src_dir, selected_file)], env=env)
+            # Run from the root directory to keep relative file paths (like modelOutput/) consistent
+            subprocess.run([sys.executable, script_path], env=env, cwd=root_dir)
         
         elif choice == cleanup_index:
             cleanup_project()
-            
         else:
             print("Invalid selection.")
 

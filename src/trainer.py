@@ -1,100 +1,97 @@
 import time
+import numpy as np
 import torch
-import torch.nn.functional as F
+import iree.runtime as ireert
 from config import *
 from lr_scheduler import get_lr
 from data_engine import get_batch
 
 class QuantCBTrainer:
-    def __init__(self, engine, optimizer, train_data, tokenizer, start_iter, device):
-        self.device = device 
-        self.engine = engine
-        self.optimizer = optimizer
+    def __init__(self, engine, config, train_data, tokenizer, start_iter):
+        self.engine = engine          # The compiled IREE module/engine
+        self.config = config          # IREE device config (Vulkan)
         self.train_data = train_data
         self.tokenizer = tokenizer
         self.start_iter = start_iter
         
-        # Pre-cache tag IDs to avoid string lookups in the hot loop
-        self.hallucinate_id = self.tokenizer.encode(TAGS["hallucinate"], output_tensor=False)[0]
+        # Pre-encode the tag for performance inside the training loop
+        tag_tokens = self.tokenizer.encode(TAGS["hallucinate"])
+        self.hallucinate_id = tag_tokens[0] if tag_tokens else -1
 
     def _save_checkpoint(self, iter_num):
-        """Standard CPU-side save."""
-        # Move state to CPU momentarily for the save
+        """Metadata checkpointing."""
+        # Ensure the directory exists (defined in config.py)
         torch.save({
             'iteration': iter_num, 
-            'model_state_dict': self.engine.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict()
         }, CHECKPOINT_PATH)
+        # Note: In a full AOT setup, weights are usually managed by 
+        # IREE's Parameter Manager or extracted via engine.get_state()
 
     def _health_check(self, iter_num):
-        """Inference on Vulkan Device."""
-        self.engine.eval()
+        """Inference using the compiled IREE module."""
         print(f"\n--- Vulkan Health Check Step {iter_num} ---")
-        with torch.no_grad():
-            seed_str = f"{TAGS['truth']}{TAGS['stories']} "
-            # Encode and move to Vulkan
-            context_ids = self.tokenizer.encode(seed_str)
-            context = context_ids.unsqueeze(0).to(self.device)
-            
-            # Pure Vulkan Generation
-            generated = self.engine.generate(context, max_new_tokens=40)
-            print(f"Output: {self.tokenizer.decode(generated[0])}\n")
-        self.engine.train()
+        seed_str = f"{TAGS['truth']}{TAGS['stories']} "
+        
+        # 1. Encode context into a NumPy array
+        context_list = self.tokenizer.encode(seed_str)
+        context_ids = np.array([context_list], dtype=np.int32)
+        
+        # 2. Map to Vulkan Device
+        v_input = ireert.asdevicearray(self.config.device, context_ids)
+        
+        # 3. Dispatch to the 'generate' function in your compiled module
+        # Note: IREE returns DeviceArrays; we convert them back to Host NumPy
+        generated = self.engine.generate(v_input)
+        
+        out_np = np.asarray(generated)
+        print(f"Output: {self.tokenizer.decode(out_np[0].tolist())}\n")
 
     def train_step(self, iter_num):
-        """Asynchronous Dispatch to RX 6800."""
-        # 1. Update LR on CPU Traffic Controller
+        """Asynchronous Dispatch to the Vulkan Driver."""
+        # 1. Update LR
         lr = get_lr(iter_num, self.start_iter)
-        for pg in self.optimizer.param_groups: 
-            pg['lr'] = lr
 
-        # 2. Fetch Pinned Batch and Ship to Vulkan
-        # non_blocking=True is the key to the Vulkan Timeline
-        xb, yb = get_batch(self.train_data, BATCH_SIZE, BLOCK_SIZE, "cpu")
-        xb, yb = xb.pin_memory().to(self.device, non_blocking=True), yb.pin_memory().to(self.device, non_blocking=True)
+        # 2. Fetch NumPy Batch (No .numpy() needed, get_batch returns ndarray)
+        xb_np, yb_np = get_batch(self.train_data, BATCH_SIZE, BLOCK_SIZE)
         
-        # 3. Vulkan Logic: Compute Drift Targets on-device
-        is_corrupted = (xb == self.hallucinate_id).any(dim=1, keepdim=True)
-        drift_targets = is_corrupted.float().expand(-1, BLOCK_SIZE).contiguous().to(self.device)
+        # 3. Compute Drift Targets (Host-side prep)
+        # This checks which sequences contain the 'hallucinate' tag
+        is_corrupted = (xb_np == self.hallucinate_id).any(axis=1, keepdims=True)
+        drift_targets = np.broadcast_to(is_corrupted, (BATCH_SIZE, BLOCK_SIZE)).astype(np.float32)
         
-        # 4. Vulkan Forward/Backward Pass
-        self.optimizer.zero_grad(set_to_none=True)
-        
-        # Execution starts on RX 6800 here
-        logits, loss, probe_logits_list = self.engine(xb, yb)
-        
-        # Multi-Loop Probe Aggregation (BCE on Vulkan)
-        probe_logits = torch.stack(probe_logits_list).mean(dim=0)
-        bce_loss = F.binary_cross_entropy_with_logits(
-            probe_logits.view(-1), 
-            drift_targets.view(-1)
-        )
-        
-        total_loss = loss + (0.5 * bce_loss)
-        total_loss.backward()
-        
-        # 5. Gradient Clipping & Optimizer Step (GPU Kernels)
-        torch.nn.utils.clip_grad_norm_(self.engine.parameters(), GRAD_CLIP)
-        self.optimizer.step()
+        # 4. Map buffers to Vulkan Device
+        # Using asdevicearray ensures zero-copy if the hardware supports Unified Memory
+        v_xb = ireert.asdevicearray(self.config.device, xb_np)
+        v_yb = ireert.asdevicearray(self.config.device, yb_np)
+        v_drift = ireert.asdevicearray(self.config.device, drift_targets)
+        v_lr = ireert.asdevicearray(self.config.device, np.array(lr, dtype=np.float32))
 
-        # We only return scalars. .item() causes a sync-point; 
-        # this is the only time the CPU waits for the GPU.
-        return total_loss.item(), bce_loss.item(), lr
+        # 5. Execute Compiled Training Step on Vulkan
+        # results will usually be a list/tuple of DeviceArrays
+        results = self.engine.train_step(v_xb, v_yb, v_drift, v_lr)
+
+        # 6. Retrieve scalars from Device to Host
+        # Assuming train_step returns [total_loss, bce_loss]
+        total_loss = np.asarray(results[0]).item()
+        bce_loss = np.asarray(results[1]).item()
+        
+        return total_loss, bce_loss, lr
 
     def run(self):
         """High-Throughput Training Loop."""
-        print(f"--- RX 6800 Vulkan Timeline Active ---")
+        print(f"--- IREE-Turbine Vulkan Timeline Active ---")
         t0 = time.time()
         
         try:
             for iter_num in range(self.start_iter, ITERATIONS):
                 loss, bce_loss, lr = self.train_step(iter_num)
 
-                # Throughput monitoring every 10 steps
+                # Throughput monitoring
                 if iter_num % 10 == 0:
                     t1 = time.time()
-                    # Calculate TPS based on actual GPU retirement speed
-                    tps = (BATCH_SIZE * BLOCK_SIZE * 10) / (t1 - t0)
+                    dt = t1 - t0
+                    # Tokens Per Second calculation
+                    tps = (BATCH_SIZE * BLOCK_SIZE * 10) / dt if dt > 0 else 0
                     print(f"Step {iter_num:4d} | Loss: {loss:.4f} | LR: {lr:.2e} | TPS: {tps:.0f}")
                     t0 = t1
 
@@ -104,4 +101,5 @@ class QuantCBTrainer:
 
         except KeyboardInterrupt:
             print("\n--- Interrupted. Final Save... ---")
-            self._save_checkpoint(iter_num)
+            # Using the last known iter_num
+            self._save_checkpoint(locals().get('iter_num', self.start_iter))
